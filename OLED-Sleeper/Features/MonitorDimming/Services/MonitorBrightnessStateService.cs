@@ -17,11 +17,30 @@ namespace OLED_Sleeper.Features.MonitorDimming.Services
         /// Sets up the file path for storing brightness state in the user's AppData directory.
         /// </summary>
         public MonitorBrightnessStateService()
+            : this(DefaultStateFilePath())
+        {
+        }
+
+        /// <summary>
+        /// Test seam — overrides the file location used to persist state. Production callers use
+        /// the parameterless constructor which resolves the path under <c>%APPDATA%\OLED-Sleeper</c>.
+        /// </summary>
+        public MonitorBrightnessStateService(string stateFilePath)
+        {
+            _stateFilePath = stateFilePath;
+            var directory = Path.GetDirectoryName(stateFilePath);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+        }
+
+        private static string DefaultStateFilePath()
         {
             var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             var settingsDir = Path.Combine(appDataPath, "OLED-Sleeper");
             Directory.CreateDirectory(settingsDir);
-            _stateFilePath = Path.Combine(settingsDir, "brightness_state.json");
+            return Path.Combine(settingsDir, "brightness_state.json");
         }
 
         #region IMonitorBrightnessStateService Implementation
@@ -60,7 +79,9 @@ namespace OLED_Sleeper.Features.MonitorDimming.Services
             {
                 var options = new JsonSerializerOptions { WriteIndented = true };
                 var json = JsonSerializer.Serialize(state, options);
-                File.WriteAllText(_stateFilePath, json);
+                var tempPath = _stateFilePath + ".tmp";
+                File.WriteAllText(tempPath, json);
+                File.Move(tempPath, _stateFilePath, overwrite: true);
             }
             catch (Exception ex)
             {

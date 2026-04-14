@@ -57,7 +57,8 @@ namespace OLED_Sleeper.Infrastructure
 
             services.AddSingleton<IMonitorInfoManager, MonitorInfoManager>();
             services.AddSingleton<IMonitorStateWatcher, MonitorStateWatcher>();
-            services.AddSingleton<IMonitorBrightnessStateService, MonitorBrightnessStateService>();
+            services.AddSingleton<IPowerEventMonitor, PowerEventMonitor>();
+            services.AddSingleton<IMonitorBrightnessStateService>(_ => new MonitorBrightnessStateService());
             services.AddSingleton<IMonitorDimmingService, MonitorDimmingService>();
             services.AddSingleton<IMonitorBlackoutService, MonitorBlackoutService>();
             services.AddSingleton<IApplicationOrchestrator, ApplicationOrchestrator>();

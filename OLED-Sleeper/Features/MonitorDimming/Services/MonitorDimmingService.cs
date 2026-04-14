@@ -29,14 +29,36 @@ namespace OLED_Sleeper.Features.MonitorDimming.Services
         }
 
         /// <inheritdoc />
-        public async Task DimMonitorAsync(string hardwareId, int dimLevel)
+        public async Task DimMonitorAsync(string? hardwareId, int dimLevel)
         {
+            if (string.IsNullOrEmpty(hardwareId)) return;
+            var clampedDim = (uint)Math.Clamp(dimLevel, 0, 100);
+
             await WithPhysicalMonitorAsync(hardwareId, hPhysicalMonitor =>
             {
+                var alreadyTracked = _originalBrightnessLevels.ContainsKey(hardwareId);
                 var currentBrightness = GetCurrentBrightness(hPhysicalMonitor, hardwareId);
                 if (currentBrightness == uint.MaxValue) return;
-                SaveOriginalBrightness(hardwareId, currentBrightness);
-                SetMonitorBrightness(hPhysicalMonitor, hardwareId, (uint)dimLevel);
+
+                if (!alreadyTracked)
+                {
+                    // Refuse to capture a value that is already at or below the dim target — that
+                    // would be a dimmed reading (e.g. after resume from sleep where the app lost
+                    // state) and saving it as "original" would lose the real pre-dim brightness.
+                    if (!BrightnessCapturePolicy.ShouldCaptureOriginal(currentBrightness, clampedDim, alreadyTracked))
+                    {
+                        Log.Warning("Skip dim for monitor {HardwareId}: current brightness {Current} already at or below target {Target}. Not capturing as original.",
+                            hardwareId, currentBrightness, clampedDim);
+                        return;
+                    }
+                    SaveOriginalBrightness(hardwareId, currentBrightness);
+                }
+                else
+                {
+                    Log.Debug("Monitor {HardwareId} already has a captured original brightness; preserving it.", hardwareId);
+                }
+
+                SetMonitorBrightness(hPhysicalMonitor, hardwareId, clampedDim);
             });
         }
 
