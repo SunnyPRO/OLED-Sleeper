@@ -27,6 +27,7 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
         private readonly IMediator _mediator;
 
         private readonly IMonitorInfoManager _monitorManager;
+        private readonly IMediaPlaybackDetector _mediaPlaybackDetector;
         private CancellationTokenSource _cancellationTokenSource;
         private List<ManagedMonitorState> _managedMonitors = new();
         private readonly object _lock = new();
@@ -39,10 +40,15 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
         /// </summary>
         /// <param name="monitorManager">Service for monitor information.</param>
         /// <param name="mediator">Mediator for dispatching monitor behavior commands.</param>
-        public MonitorIdleDetectionService(IMonitorInfoManager monitorManager, IMediator mediator)
+        /// <param name="mediaPlaybackDetector">Detector for active media playback windows.</param>
+        public MonitorIdleDetectionService(
+            IMonitorInfoManager monitorManager,
+            IMediator mediator,
+            IMediaPlaybackDetector mediaPlaybackDetector)
         {
             _monitorManager = monitorManager;
             _mediator = mediator;
+            _mediaPlaybackDetector = mediaPlaybackDetector;
         }
 
         // === Service Lifecycle ===
@@ -130,7 +136,7 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
         /// </summary>
         private void ProcessMonitors()
         {
-            var systemState = GetSystemState();
+            var systemState = GetSystemState(_mediaPlaybackDetector);
 
             lock (_lock)
             {
@@ -244,6 +250,10 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
         /// <returns>The activity reason.</returns>
         private static ActivityReason GetActivityReason(ManagedMonitorState monitor, SystemState state)
         {
+            // Media playback takes precedence: if the user is actively watching or listening to
+            // something on this monitor, never dim or black it out regardless of input idle time.
+            if (IsMediaPlaybackActive(monitor, state))
+                return ActivityReason.MediaPlaying;
             if (IsSystemInputActive(monitor, state))
                 return ActivityReason.SystemInput;
             if (IsMousePositionActive(monitor, state))
@@ -251,6 +261,23 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
             if (IsActiveWindowActive(monitor, state))
                 return ActivityReason.ActiveWindow;
             return ActivityReason.None;
+        }
+
+        /// <summary>
+        /// Checks if any audio-rendering process has a visible window intersecting this monitor.
+        /// </summary>
+        private static bool IsMediaPlaybackActive(ManagedMonitorState monitor, SystemState state)
+        {
+            if (!monitor.Settings.IsActiveOnMediaPlayback) return false;
+            if (state.MediaPlaybackWindowRects.Count == 0) return false;
+
+            foreach (var rect in state.MediaPlaybackWindowRects)
+            {
+                var intersection = Rect.Intersect(monitor.Bounds, rect);
+                if (!intersection.IsEmpty && intersection.Width > 0 && intersection.Height > 0)
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>
@@ -289,14 +316,15 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
         /// Gathers all required system-wide state information at once.
         /// </summary>
         /// <returns>System state snapshot.</returns>
-        private static SystemState GetSystemState()
+        private static SystemState GetSystemState(IMediaPlaybackDetector mediaPlaybackDetector)
         {
             uint idleTime = GetSystemIdleTimeMilliseconds();
             NativeMethods.GetCursorPos(out var nativePoint);
             Point cursorPosition = new(nativePoint.X, nativePoint.Y);
             nint foregroundWindowHandle = NativeMethods.GetForegroundWindow();
             Rect windowRect = GetForegroundWindowRect(foregroundWindowHandle);
-            return new SystemState(idleTime, cursorPosition, windowRect, foregroundWindowHandle);
+            var mediaRects = mediaPlaybackDetector.GetPlaybackWindowRects();
+            return new SystemState(idleTime, cursorPosition, windowRect, foregroundWindowHandle, mediaRects);
         }
 
         /// <summary>
@@ -373,13 +401,15 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
             public readonly Point CursorPosition;
             public readonly Rect ForegroundWindowRect;
             public readonly nint ForegroundWindowHandle;
+            public readonly IReadOnlyList<Rect> MediaPlaybackWindowRects;
 
-            public SystemState(uint idleTime, Point cursorPosition, Rect windowRect, nint windowHandle)
+            public SystemState(uint idleTime, Point cursorPosition, Rect windowRect, nint windowHandle, IReadOnlyList<Rect> mediaPlaybackWindowRects)
             {
                 IdleTimeMilliseconds = idleTime;
                 CursorPosition = cursorPosition;
                 ForegroundWindowRect = windowRect;
                 ForegroundWindowHandle = windowHandle;
+                MediaPlaybackWindowRects = mediaPlaybackWindowRects;
             }
         }
     }

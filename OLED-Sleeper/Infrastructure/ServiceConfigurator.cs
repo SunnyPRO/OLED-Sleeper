@@ -67,6 +67,7 @@ namespace OLED_Sleeper.Infrastructure
             services.AddSingleton<IMonitorLayoutService, MonitorLayoutService>();
             services.AddSingleton<IMonitorSettingsFileService, MonitorSettingsFileService>();
             services.AddSingleton<IMonitorIdleDetectionService, MonitorIdleDetectionService>();
+            services.AddSingleton<IMediaPlaybackDetector, MediaPlaybackDetector>();
             services.AddSingleton<MainViewModel>();
             services.AddSingleton<MainWindow>();
             services.AddSingleton<ITrayIconService, TrayIconService>();

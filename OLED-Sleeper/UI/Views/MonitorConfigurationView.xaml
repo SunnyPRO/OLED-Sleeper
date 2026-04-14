@@ -421,6 +421,9 @@
                         IsChecked="{Binding IsActiveOnMousePosition, UpdateSourceTrigger=PropertyChanged, ValidatesOnDataErrors=True}" />
                             <CheckBox Margin="0,0,0,8" Style="{StaticResource ModernCheckBox}" Content="Application is focused on this monitor"
                         IsChecked="{Binding IsActiveOnActiveWindow, UpdateSourceTrigger=PropertyChanged, ValidatesOnDataErrors=True}" />
+                            <CheckBox Margin="0,0,0,8" Style="{StaticResource ModernCheckBox}" Content="Media is playing on this monitor"
+                        IsChecked="{Binding IsActiveOnMediaPlayback, UpdateSourceTrigger=PropertyChanged, ValidatesOnDataErrors=True}"
+                        ToolTip="Keeps this monitor awake while any app (video player, browser tab, music app) is rendering audio and has a window on this monitor." />
                             <CheckBox Margin="0,0,0,0" Style="{StaticResource ModernCheckBox}" Content="System has user input"
                         IsChecked="{Binding IsActiveOnInput, UpdateSourceTrigger=PropertyChanged, ValidatesOnDataErrors=True}" />
                         </StackPanel>

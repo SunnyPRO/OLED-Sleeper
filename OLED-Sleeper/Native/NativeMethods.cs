@@ -46,6 +46,34 @@ namespace OLED_Sleeper.Native
         [DllImport("user32.dll")]
         public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
 
+        /// <summary>Delegate for <see cref="EnumWindows"/> / <see cref="EnumThreadWindows"/> callbacks.</summary>
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        /// <summary>Enumerates all top-level windows on the screen.</summary>
+        [DllImport("user32.dll")]
+        public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        /// <summary>Returns the ID of the thread that created the window and, via out-param, the owning process.</summary>
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        /// <summary>Indicates whether the specified window is visible.</summary>
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        /// <summary>Indicates whether the window is minimized/iconified.</summary>
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsIconic(IntPtr hWnd);
+
+        /// <summary>Returns the specified window's owner handle (0 if none).</summary>
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+        /// <summary>Parameter for <see cref="GetWindow"/> to retrieve the owner window.</summary>
+        public const uint GW_OWNER = 4;
+
         /// <summary>
         /// Retrieves a handle to the foreground window (the window with which the user is currently working).
         /// </summary>

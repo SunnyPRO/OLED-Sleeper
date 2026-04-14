@@ -54,6 +54,12 @@ namespace OLED_Sleeper.Features.UserSettings.Models
         public bool IsActiveOnActiveWindow { get; set; } = false;
 
         /// <summary>
+        /// Gets or sets a value indicating whether a process rendering audio on this monitor
+        /// should reset idle state (e.g. video players, music apps, browser tabs playing video).
+        /// </summary>
+        public bool IsActiveOnMediaPlayback { get; set; } = true;
+
+        /// <summary>
         /// Gets the idle timeout in milliseconds, based on <see cref="IdleValue"/> and <see cref="IdleUnit"/>.
         /// </summary>
         public int IdleTimeMilliseconds
