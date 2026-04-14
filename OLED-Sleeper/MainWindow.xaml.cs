@@ -56,11 +56,13 @@ namespace OLED_Sleeper
         }
 
         /// <summary>
-        /// Minimizes the window when the minimize button is clicked.
+        /// Sends the window to the tray. The window is fully closed (not hidden) so WPF can
+        /// release its DirectX swap chain; a new instance is created by <c>MainWindowService</c>
+        /// the next time the user clicks the tray icon.
         /// </summary>
         private void MinimizeButton_Click(object sender, RoutedEventArgs e)
         {
-            WindowState = WindowState.Minimized;
+            Close();
         }
 
         /// <summary>

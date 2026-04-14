@@ -69,7 +69,10 @@ namespace OLED_Sleeper.Infrastructure
             services.AddSingleton<IMonitorIdleDetectionService, MonitorIdleDetectionService>();
             services.AddSingleton<IMediaPlaybackDetector, MediaPlaybackDetector>();
             services.AddSingleton<MainViewModel>();
-            services.AddSingleton<MainWindow>();
+            // MainWindow is transient. The service closes + re-creates it when the user
+            // toggles the tray icon. Closing (not hiding) releases the DirectX swap chain,
+            // so the app consumes ~0% GPU while sitting in the tray.
+            services.AddTransient<MainWindow>();
             services.AddSingleton<ITrayIconService, TrayIconService>();
             services.AddSingleton<IMainWindowService, MainWindowService>();
             services.AddSingleton<IApplicationInstanceManager>(_ => instanceManager);
