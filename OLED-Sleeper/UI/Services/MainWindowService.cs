@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using OLED_Sleeper.Infrastructure;
 using OLED_Sleeper.UI.Services.Interfaces;
 using OLED_Sleeper.UI.ViewModels;
+using Serilog;
 using System.Windows;
 
 namespace OLED_Sleeper.UI.Services
@@ -16,6 +17,12 @@ namespace OLED_Sleeper.UI.Services
     /// </summary>
     public class MainWindowService : IMainWindowService
     {
+        // Treat process launches within this many milliseconds of system boot as "boot
+        // launches" — display drivers, DDC/CI, and User32 desktop heap quotas are still
+        // settling. Creating a WPF Window here can hit "Win32Exception 1816 (Not enough
+        // quota)" inside HwndTarget.UpdateWindowSettings, killing the whole process.
+        private const long BootSettleMilliseconds = 120_000;
+
         private readonly IServiceProvider _serviceProvider;
         private readonly MainViewModel _mainViewModel;
         private readonly ApplicationOptions _options;
@@ -33,14 +40,25 @@ namespace OLED_Sleeper.UI.Services
 
         /// <summary>
         /// Called once during bootstrap. Opens the window unless <see cref="ApplicationOptions.StartHidden"/>
-        /// is set, in which case no window is created at all — the app just starts in the tray.
+        /// is set, or the process was launched while the system is still finishing boot.
         /// </summary>
         public void SetupMainWindow()
         {
-            if (!_options.StartHidden)
+            if (_options.StartHidden)
             {
-                ShowMainWindow();
+                Log.Information("Start-hidden flag set; skipping initial window creation.");
+                return;
             }
+
+            if (Environment.TickCount64 < BootSettleMilliseconds)
+            {
+                Log.Information(
+                    "Process launched {UptimeMs} ms after boot — staying in tray to avoid window-creation failures during driver settle.",
+                    Environment.TickCount64);
+                return;
+            }
+
+            ShowMainWindow();
         }
 
         /// <summary>
@@ -55,20 +73,39 @@ namespace OLED_Sleeper.UI.Services
                 return;
             }
 
-            if (_currentWindow == null)
+            try
             {
-                _currentWindow = _serviceProvider.GetRequiredService<MainWindow>();
-                _currentWindow.DataContext = _mainViewModel;
-                _currentWindow.Closed += OnWindowClosed;
-                Application.Current.MainWindow = _currentWindow;
-            }
+                if (_currentWindow == null)
+                {
+                    _currentWindow = _serviceProvider.GetRequiredService<MainWindow>();
+                    _currentWindow.DataContext = _mainViewModel;
+                    _currentWindow.Closed += OnWindowClosed;
+                    Application.Current.MainWindow = _currentWindow;
+                }
 
-            if (_currentWindow.WindowState == WindowState.Minimized)
-            {
-                _currentWindow.WindowState = WindowState.Normal;
+                if (_currentWindow.WindowState == WindowState.Minimized)
+                {
+                    _currentWindow.WindowState = WindowState.Normal;
+                }
+                _currentWindow.Show();
+                _currentWindow.Activate();
             }
-            _currentWindow.Show();
-            _currentWindow.Activate();
+            catch (Exception ex)
+            {
+                // A failed Show is recoverable — just leave the app running in the tray. The
+                // user can try again later. Crashing the process leaves a stale tray ghost
+                // that looks frozen until they manually relaunch.
+                Log.Error(ex, "Failed to show main window; keeping app in tray.");
+                if (_currentWindow != null)
+                {
+                    try { _currentWindow.Close(); } catch { /* best effort */ }
+                    _currentWindow = null;
+                    if (ReferenceEquals(Application.Current.MainWindow, null) == false)
+                    {
+                        Application.Current.MainWindow = null;
+                    }
+                }
+            }
         }
 
         private void OnWindowClosed(object? sender, EventArgs e)

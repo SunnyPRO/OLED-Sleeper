@@ -3,6 +3,7 @@ using OLED_Sleeper.Features.MonitorInformation.Models;
 using OLED_Sleeper.Features.MonitorInformation.Services.Interfaces;
 using OLED_Sleeper.Features.MonitorState.Commands;
 using OLED_Sleeper.Features.MonitorState.Services.Interfaces;
+using Serilog;
 using System.Timers;
 using Timer = System.Timers.Timer;
 
@@ -10,28 +11,35 @@ namespace OLED_Sleeper.Features.MonitorState.Services
 {
     /// <summary>
     /// Monitors the set of connected displays and dispatches synchronization commands when changes are detected.
-    /// This class polls the system for monitor changes and uses the mediator pattern to notify the application of state changes.
     /// </summary>
+    /// <remarks>
+    /// Performs two kinds of polls. A cheap basic poll runs every <c>pollIntervalMs</c> and
+    /// detects connect/disconnect by device-name set. A periodic deep poll runs at
+    /// <see cref="DeepPollIntervalMs"/> and re-enriches the cached info so that DDC/CI
+    /// support flips and hardware-id changes — which the basic poll cannot see — also
+    /// trigger a state synchronization. Without the deep poll, monitors that boot with
+    /// DDC/CI reporting <c>false</c> never become managed even after the driver settles
+    /// and starts reporting <c>true</c>; observed in the field on cold boot.
+    /// </remarks>
     public class MonitorStateWatcher : IMonitorStateWatcher
     {
         #region Fields
+
+        // Re-enrich (DDC/CI + HardwareId) every 30s to catch boot-time flips that the
+        // device-name poll cannot see.
+        private const double DeepPollIntervalMs = 30_000;
 
         private readonly IMonitorInfoManager _monitorInfoManager;
         private readonly IMediator _mediator;
         private readonly Timer _pollTimer;
         private readonly object _lock = new();
         private IReadOnlyList<MonitorInfo> _lastKnownMonitors = Array.Empty<MonitorInfo>();
+        private DateTime _lastDeepPollUtc = DateTime.MinValue;
 
         #endregion Fields
 
         #region Constructor
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="MonitorStateWatcher"/> class.
-        /// </summary>
-        /// <param name="monitorInfoManager">Service for querying current monitor information.</param>
-        /// <param name="mediator">Mediator for dispatching monitor state commands.</param>
-        /// <param name="pollIntervalMs">Polling interval in milliseconds. Default is 2000ms.</param>
         public MonitorStateWatcher(IMonitorInfoManager monitorInfoManager, IMediator mediator, double pollIntervalMs = 2000)
         {
             _monitorInfoManager = monitorInfoManager;
@@ -44,9 +52,6 @@ namespace OLED_Sleeper.Features.MonitorState.Services
 
         #region Public Methods
 
-        /// <summary>
-        /// Starts monitoring for monitor state changes. The initial monitor list is retrieved and the timer is started.
-        /// </summary>
         public void Start()
         {
             lock (_lock)
@@ -58,9 +63,6 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             }
         }
 
-        /// <summary>
-        /// Stops monitoring for monitor state changes.
-        /// </summary>
         public void Stop()
         {
             lock (_lock)
@@ -69,9 +71,6 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             }
         }
 
-        /// <summary>
-        /// Releases resources used by the watcher.
-        /// </summary>
         public void Dispose()
         {
             _pollTimer?.Dispose();
@@ -81,17 +80,14 @@ namespace OLED_Sleeper.Features.MonitorState.Services
 
         #region Private Methods
 
-        /// <summary>
-        /// Retrieves the initial monitor list asynchronously and starts the polling timer.
-        /// Dispatches a synchronization command for the initial state.
-        /// </summary>
         private void RetrieveInitialMonitorList()
         {
-            EventHandler<IReadOnlyList<MonitorInfo>> handler = null;
+            EventHandler<IReadOnlyList<MonitorInfo>> handler = null!;
             handler = (sender, monitors) =>
             {
                 _monitorInfoManager.MonitorListReady -= handler;
                 _lastKnownMonitors = monitors;
+                _lastDeepPollUtc = DateTime.UtcNow;
                 _mediator.SendAsync(new SynchronizeMonitorStateCommand([], _lastKnownMonitors));
                 _pollTimer.Start();
             };
@@ -99,31 +95,38 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             _monitorInfoManager.GetCurrentMonitorsAsync();
         }
 
-        /// <summary>
-        /// Polls for monitor changes and dispatches a synchronization command if a change is detected.
-        /// </summary>
         private void PollTimerElapsed(object? sender, ElapsedEventArgs e)
         {
             lock (_lock)
             {
                 var currentMonitors = _monitorInfoManager.GetLatestMonitorsBasicInfo();
-                if (!AreMonitorListsEqual(_lastKnownMonitors, currentMonitors))
+                bool basicChange = !AreBasicMonitorListsEqual(_lastKnownMonitors, currentMonitors);
+
+                bool deepDue = (DateTime.UtcNow - _lastDeepPollUtc).TotalMilliseconds >= DeepPollIntervalMs;
+                if (basicChange || deepDue)
                 {
                     EnrichMonitorInfoList(currentMonitors);
-                    var oldMonitors = _lastKnownMonitors;
-                    _lastKnownMonitors = currentMonitors;
-                    _mediator.SendAsync(new SynchronizeMonitorStateCommand(oldMonitors, currentMonitors));
+                    _lastDeepPollUtc = DateTime.UtcNow;
+
+                    if (basicChange || !AreEnrichedMonitorListsEqual(_lastKnownMonitors, currentMonitors))
+                    {
+                        Log.Information(
+                            "Monitor state changed (basicChange={BasicChange}, deepPoll={DeepDue}). Re-syncing {Count} monitors.",
+                            basicChange, deepDue, currentMonitors.Count);
+
+                        var oldMonitors = _lastKnownMonitors;
+                        _lastKnownMonitors = currentMonitors;
+                        _mediator.SendAsync(new SynchronizeMonitorStateCommand(oldMonitors, currentMonitors));
+                    }
                 }
             }
         }
 
         /// <summary>
-        /// Compares two monitor lists for equality based on device name set and count.
+        /// Cheap comparison — just device-name set. Used to detect monitor connect/disconnect
+        /// without paying the cost of DDC/CI enumeration.
         /// </summary>
-        /// <param name="a">First monitor list.</param>
-        /// <param name="b">Second monitor list.</param>
-        /// <returns>True if the lists are equal; otherwise, false.</returns>
-        private static bool AreMonitorListsEqual(IReadOnlyList<MonitorInfo>? a, IReadOnlyList<MonitorInfo>? b)
+        internal static bool AreBasicMonitorListsEqual(IReadOnlyList<MonitorInfo>? a, IReadOnlyList<MonitorInfo>? b)
         {
             if (a == null || b == null) return false;
             if (a.Count != b.Count) return false;
@@ -133,9 +136,23 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         }
 
         /// <summary>
-        /// Enriches a list of MonitorInfo objects with DDC/CI support and hardware ID.
+        /// Full comparison including HardwareId and DDC/CI support. Catches the case where
+        /// the device-name set is unchanged but the underlying capabilities flipped (e.g.
+        /// DDC/CI reported <c>false</c> at boot then <c>true</c> after the driver settles).
         /// </summary>
-        /// <param name="monitors">The list of monitors to enrich.</param>
+        internal static bool AreEnrichedMonitorListsEqual(IReadOnlyList<MonitorInfo>? a, IReadOnlyList<MonitorInfo>? b)
+        {
+            if (a == null || b == null) return false;
+            if (a.Count != b.Count) return false;
+
+            string Key(MonitorInfo m) =>
+                $"{m.DeviceName ?? string.Empty}|{m.HardwareId ?? string.Empty}|{(m.IsDdcCiSupported ? 1 : 0)}";
+
+            var aKeys = new HashSet<string>(a.Select(Key));
+            var bKeys = new HashSet<string>(b.Select(Key));
+            return aKeys.SetEquals(bKeys);
+        }
+
         private void EnrichMonitorInfoList(List<MonitorInfo> monitors)
         {
             _monitorInfoManager.EnrichMonitorInfoList(monitors);
