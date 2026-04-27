@@ -115,6 +115,16 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
             }
         }
 
+        /// <inheritdoc />
+        public void UpdateCachedMonitors(List<MonitorInfo> monitors)
+        {
+            if (monitors == null) return;
+            lock (_lock)
+            {
+                _cachedMonitors = monitors;
+            }
+        }
+
         #endregion Public Methods
 
         #region Private Methods

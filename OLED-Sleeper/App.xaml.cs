@@ -27,18 +27,21 @@ namespace OLED_Sleeper
         protected override void OnStartup(StartupEventArgs e)
         {
             base.OnStartup(e);
-            // Hook every plausible failure surface BEFORE the bootstrapper runs so even DI
-            // construction errors are logged and (where survivable) swallowed. We've seen the
-            // process die from transient Win32Exception 1816 ("Not enough quota") inside
-            // WPF's HwndTarget.UpdateWindowSettings -> PostMessage during sleep/resume and
-            // boot-time window creation; killing the process leaves a stale tray ghost and
-            // makes the user think the app is "frozen".
-            DispatcherUnhandledException += OnDispatcherUnhandledException;
+
+            // Log-only handlers are safe to install pre-init: they let bootstrap failures
+            // produce a useful trace before the runtime tears the process down.
             AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandledException;
             System.Threading.Tasks.TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
             SessionEnding += App_SessionEnding;
             StartBootstrapper(e);
+
+            // The dispatcher swallow is only safe AFTER bootstrapping has wired up the tray
+            // icon and shutdown path. If we hooked it earlier, a startup failure would leave
+            // an invisible zombie process (no window, no tray, ShutdownMode=OnExplicitShutdown)
+            // that the user cannot exit. With the hook installed here, a pre-init failure
+            // crashes normally and the user can simply relaunch.
+            DispatcherUnhandledException += OnDispatcherUnhandledException;
         }
 
         /// <summary>

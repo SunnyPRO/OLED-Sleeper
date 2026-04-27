@@ -37,5 +37,15 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services.Interfaces
         /// </summary>
         /// <param name="monitors">The list of monitors to enrich.</param>
         void EnrichMonitorInfoList(List<MonitorInfo> monitors);
+
+        /// <summary>
+        /// Replaces the cached monitor list with an externally-enriched snapshot. Used by
+        /// pollers (e.g. <c>MonitorStateWatcher</c>) that already paid the DDC/CI enumeration
+        /// cost and want their fresh data to be the answer for the next
+        /// <see cref="GetCurrentMonitorsAsync"/> call so downstream consumers don't keep
+        /// reading stale capabilities.
+        /// </summary>
+        /// <param name="monitors">The freshly enriched monitor list to install as the cache.</param>
+        void UpdateCachedMonitors(List<MonitorInfo> monitors);
     }
 }

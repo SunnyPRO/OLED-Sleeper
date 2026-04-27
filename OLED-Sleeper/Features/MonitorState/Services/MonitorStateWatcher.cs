@@ -114,6 +114,12 @@ namespace OLED_Sleeper.Features.MonitorState.Services
                             "Monitor state changed (basicChange={BasicChange}, deepPoll={DeepDue}). Re-syncing {Count} monitors.",
                             basicChange, deepDue, currentMonitors.Count);
 
+                        // Push the freshly enriched list into the manager's cache so any consumer
+                        // that calls GetCurrentMonitorsAsync afterwards (workspace UI, blackout
+                        // overlay placement, dim service) sees the updated capabilities instead
+                        // of the stale boot-time snapshot.
+                        _monitorInfoManager.UpdateCachedMonitors(currentMonitors);
+
                         var oldMonitors = _lastKnownMonitors;
                         _lastKnownMonitors = currentMonitors;
                         _mediator.SendAsync(new SynchronizeMonitorStateCommand(oldMonitors, currentMonitors));
