@@ -40,6 +40,11 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         // Touched only under _lock, except _isPollRunning which is Interlocked-guarded.
         private IReadOnlyList<MonitorInfo> _lastKnownMonitors = Array.Empty<MonitorInfo>();
         private DateTime _lastResyncUtc = DateTime.MinValue;
+        // DeviceNames that have been observed with an empty HardwareId after enrichment —
+        // i.e. phantom virtual displays (iGPU bridges, RDP, virtual cameras). Cached so the
+        // basic poll can ignore connect/disconnect of these names without re-running DDC
+        // enumeration every time they flap.
+        private HashSet<string> _knownPhantomDeviceNames = new();
         private int _isPollRunning;
         private bool _isStopped;
 
@@ -100,7 +105,9 @@ namespace OLED_Sleeper.Features.MonitorState.Services
                 lock (_lock)
                 {
                     if (_isStopped) return;
-                    _lastKnownMonitors = FilterManageableMonitors(monitors);
+                    var manageable = FilterManageableMonitors(monitors);
+                    UpdatePhantomCache(monitors, manageable);
+                    _lastKnownMonitors = manageable;
                     _lastResyncUtc = DateTime.UtcNow;
                     _mediator.SendAsync(new SynchronizeMonitorStateCommand([], _lastKnownMonitors));
                     _pollTimer.Start();
@@ -140,19 +147,26 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             // Take a quick snapshot under the lock, then do slow work outside.
             IReadOnlyList<MonitorInfo> lastKnownSnapshot;
             DateTime lastResyncSnapshot;
+            HashSet<string> phantomSnapshot;
             lock (_lock)
             {
                 if (_isStopped) return;
                 lastKnownSnapshot = _lastKnownMonitors;
                 lastResyncSnapshot = _lastResyncUtc;
+                phantomSnapshot = new HashSet<string>(_knownPhantomDeviceNames);
             }
 
             var basicCurrent = _monitorInfoManager.GetLatestMonitorsBasicInfo();
-            if (AreBasicMonitorListsEqual(lastKnownSnapshot, basicCurrent)) return;
+            // Drop names already classified as phantoms so their flapping doesn't trigger
+            // an enrichment pass. They'll be re-classified on the boot revalidate or the
+            // next genuine non-phantom change.
+            var basicCurrentManageable = basicCurrent.Where(m => m.DeviceName != null && !phantomSnapshot.Contains(m.DeviceName)).ToList();
+            if (AreBasicMonitorListsEqual(lastKnownSnapshot, basicCurrentManageable)) return;
 
             if ((DateTime.UtcNow - lastResyncSnapshot).TotalMilliseconds < MinResyncIntervalMs)
             {
-                // Phantom virtual-display flap. Don't touch idle detection.
+                // Even after phantom suppression we got a genuine flap inside the cooldown.
+                // Skip — the next poll outside the window will catch it.
                 return;
             }
 
@@ -160,6 +174,13 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             // Stop()/Start() and the boot revalidate timer can proceed.
             EnrichMonitorInfoList(basicCurrent);
             var manageable = FilterManageableMonitors(basicCurrent);
+
+            // Update phantom cache while we have fresh enrichment data.
+            lock (_lock)
+            {
+                if (_isStopped) return;
+                UpdatePhantomCache(basicCurrent, manageable);
+            }
 
             CommitResync(manageable, lastKnownSnapshot, "basic poll detected device-name change");
         }
@@ -178,6 +199,12 @@ namespace OLED_Sleeper.Features.MonitorState.Services
                 var current = _monitorInfoManager.GetLatestMonitorsBasicInfo();
                 EnrichMonitorInfoList(current);
                 var manageable = FilterManageableMonitors(current);
+
+                lock (_lock)
+                {
+                    if (_isStopped) return;
+                    UpdatePhantomCache(current, manageable);
+                }
 
                 if (AreEnrichedMonitorListsEqual(lastKnownSnapshot, manageable))
                 {
@@ -216,23 +243,44 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         }
 
         /// <summary>
-        /// Drops monitors that cannot be managed (no HardwareId or no DeviceName). Phantom
-        /// virtual displays from iGPU bridges, RDP, and virtual cameras frequently appear in
+        /// Drops monitors that cannot be managed downstream. Phantom virtual displays from
+        /// iGPU bridges, RDP, and virtual cameras frequently appear in
         /// <see cref="NativeMethods.EnumDisplayMonitors"/> with empty hardware IDs; the idle
         /// detection service joins settings on HardwareId so they could never become active
         /// anyway, and including them in comparisons just creates churn.
         /// </summary>
+        /// <remarks>
+        /// Must be called only after <c>EnrichMonitorInfoList</c> — pre-enrichment all
+        /// HardwareIds are null and the filter would drop everything.
+        /// </remarks>
         internal static List<MonitorInfo> FilterManageableMonitors(IReadOnlyList<MonitorInfo> monitors)
         {
             var result = new List<MonitorInfo>(monitors.Count);
             foreach (var m in monitors)
             {
                 if (string.IsNullOrEmpty(m.DeviceName)) continue;
-                // HardwareId is only filled by the enricher. Pre-enrichment we keep them so
-                // the basic poll can still detect connect/disconnect by device name.
+                if (string.IsNullOrEmpty(m.HardwareId)) continue;
                 result.Add(m);
             }
             return result;
+        }
+
+        /// <summary>
+        /// Records DeviceNames that the enricher returned without a HardwareId so future
+        /// basic polls can ignore them. The cache only grows; if a phantom name later
+        /// appears with a real HardwareId, the next deep enrichment will already place
+        /// it in the manageable list and resync — the stale phantom-cache entry is then
+        /// just dead weight (matched names that aren't in the basic list anyway).
+        /// </summary>
+        private void UpdatePhantomCache(IReadOnlyList<MonitorInfo> enriched, List<MonitorInfo> manageable)
+        {
+            var manageableNames = new HashSet<string>(manageable.Select(m => m.DeviceName!).OfType<string>());
+            foreach (var m in enriched)
+            {
+                if (m.DeviceName == null) continue;
+                if (manageableNames.Contains(m.DeviceName)) continue;
+                _knownPhantomDeviceNames.Add(m.DeviceName);
+            }
         }
 
         /// <summary>
