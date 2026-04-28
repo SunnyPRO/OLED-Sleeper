@@ -266,15 +266,19 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         }
 
         /// <summary>
-        /// Records DeviceNames that the enricher returned without a HardwareId so future
-        /// basic polls can ignore them. The cache only grows; if a phantom name later
-        /// appears with a real HardwareId, the next deep enrichment will already place
-        /// it in the manageable list and resync — the stale phantom-cache entry is then
-        /// just dead weight (matched names that aren't in the basic list anyway).
+        /// Synchronizes the phantom cache with the latest enrichment snapshot. DeviceNames
+        /// missing a HardwareId are added; DeviceNames that have come back as manageable
+        /// are removed so a name that flips from phantom→real (e.g. RDP reconnect, dock
+        /// hot-plug, driver settle) is no longer suppressed by the basic poll. Without the
+        /// removal step the cache would be monotonic and a real monitor reusing a
+        /// previously-phantom name would be invisible to the basic poll, causing both
+        /// missed detections and repeated resyncs after the next enrichment.
         /// </summary>
         private void UpdatePhantomCache(IReadOnlyList<MonitorInfo> enriched, List<MonitorInfo> manageable)
         {
             var manageableNames = new HashSet<string>(manageable.Select(m => m.DeviceName!).OfType<string>());
+            // Names now manageable can no longer be phantoms.
+            _knownPhantomDeviceNames.ExceptWith(manageableNames);
             foreach (var m in enriched)
             {
                 if (m.DeviceName == null) continue;
