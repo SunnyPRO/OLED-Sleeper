@@ -10,31 +10,39 @@ using Timer = System.Timers.Timer;
 namespace OLED_Sleeper.Features.MonitorState.Services
 {
     /// <summary>
-    /// Monitors the set of connected displays and dispatches synchronization commands when changes are detected.
+    /// Monitors the set of connected displays and dispatches synchronization commands when
+    /// changes are detected.
     /// </summary>
     /// <remarks>
-    /// Performs two kinds of polls. A cheap basic poll runs every <c>pollIntervalMs</c> and
-    /// detects connect/disconnect by device-name set. A periodic deep poll runs at
-    /// <see cref="DeepPollIntervalMs"/> and re-enriches the cached info so that DDC/CI
-    /// support flips and hardware-id changes — which the basic poll cannot see — also
-    /// trigger a state synchronization. Without the deep poll, monitors that boot with
-    /// DDC/CI reporting <c>false</c> never become managed even after the driver settles
-    /// and starts reporting <c>true</c>; observed in the field on cold boot.
+    /// Cheap basic poll runs every <c>pollIntervalMs</c> and detects connect/disconnect by
+    /// device-name set. To handle the cold-boot case where DDC/CI reports <c>false</c> for a
+    /// monitor that later starts reporting <c>true</c> once drivers settle, the watcher also
+    /// schedules a single deferred deep re-validation <see cref="BootDeepRevalidateMs"/>
+    /// after the initial sync. A periodic deep poll is intentionally avoided: in the field
+    /// it caused phantom virtual-display flapping (DISPLAY10/11/12...) to churn DDC
+    /// enumeration every 30 s, restarting idle detection mid-cycle and freezing the app.
+    /// Re-syncs are also rate-limited to <see cref="MinResyncIntervalMs"/> apart so a
+    /// flapping phantom monitor cannot stop/start idle detection in tight loops.
     /// </remarks>
     public class MonitorStateWatcher : IMonitorStateWatcher
     {
         #region Fields
 
-        // Re-enrich (DDC/CI + HardwareId) every 30s to catch boot-time flips that the
-        // device-name poll cannot see.
-        private const double DeepPollIntervalMs = 30_000;
+        // One-shot deferred deep re-validate runs ~90s after initial sync. Catches the
+        // cold-boot DDC/CI=false→true flip without any periodic churn.
+        private const double BootDeepRevalidateMs = 90_000;
+
+        // Floor between consecutive resyncs. Phantom virtual displays flapping faster than
+        // this won't restart idle detection.
+        private const double MinResyncIntervalMs = 30_000;
 
         private readonly IMonitorInfoManager _monitorInfoManager;
         private readonly IMediator _mediator;
         private readonly Timer _pollTimer;
+        private readonly Timer _bootRevalidateTimer;
         private readonly object _lock = new();
         private IReadOnlyList<MonitorInfo> _lastKnownMonitors = Array.Empty<MonitorInfo>();
-        private DateTime _lastDeepPollUtc = DateTime.MinValue;
+        private DateTime _lastResyncUtc = DateTime.MinValue;
 
         #endregion Fields
 
@@ -44,8 +52,12 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         {
             _monitorInfoManager = monitorInfoManager;
             _mediator = mediator;
+
             _pollTimer = new Timer(pollIntervalMs) { AutoReset = true };
             _pollTimer.Elapsed += PollTimerElapsed;
+
+            _bootRevalidateTimer = new Timer(BootDeepRevalidateMs) { AutoReset = false };
+            _bootRevalidateTimer.Elapsed += BootRevalidateElapsed;
         }
 
         #endregion Constructor
@@ -68,12 +80,14 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             lock (_lock)
             {
                 _pollTimer.Stop();
+                _bootRevalidateTimer.Stop();
             }
         }
 
         public void Dispose()
         {
             _pollTimer?.Dispose();
+            _bootRevalidateTimer?.Dispose();
         }
 
         #endregion Public Methods
@@ -87,9 +101,18 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             {
                 _monitorInfoManager.MonitorListReady -= handler;
                 _lastKnownMonitors = monitors;
-                _lastDeepPollUtc = DateTime.UtcNow;
+                _lastResyncUtc = DateTime.UtcNow;
                 _mediator.SendAsync(new SynchronizeMonitorStateCommand([], _lastKnownMonitors));
                 _pollTimer.Start();
+
+                // Only schedule the boot re-validate when we are actually still in the
+                // boot-settle window. After that, drivers are stable and any later DDC/CI
+                // change will arrive via PowerEventMonitor (resume/unlock) or a real
+                // device-name change picked up by the basic poll.
+                if (Environment.TickCount64 < 120_000)
+                {
+                    _bootRevalidateTimer.Start();
+                }
             };
             _monitorInfoManager.MonitorListReady += handler;
             _monitorInfoManager.GetCurrentMonitorsAsync();
@@ -100,32 +123,51 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             lock (_lock)
             {
                 var currentMonitors = _monitorInfoManager.GetLatestMonitorsBasicInfo();
-                bool basicChange = !AreBasicMonitorListsEqual(_lastKnownMonitors, currentMonitors);
+                if (AreBasicMonitorListsEqual(_lastKnownMonitors, currentMonitors)) return;
 
-                bool deepDue = (DateTime.UtcNow - _lastDeepPollUtc).TotalMilliseconds >= DeepPollIntervalMs;
-                if (basicChange || deepDue)
+                if ((DateTime.UtcNow - _lastResyncUtc).TotalMilliseconds < MinResyncIntervalMs)
                 {
-                    EnrichMonitorInfoList(currentMonitors);
-                    _lastDeepPollUtc = DateTime.UtcNow;
-
-                    if (basicChange || !AreEnrichedMonitorListsEqual(_lastKnownMonitors, currentMonitors))
-                    {
-                        Log.Information(
-                            "Monitor state changed (basicChange={BasicChange}, deepPoll={DeepDue}). Re-syncing {Count} monitors.",
-                            basicChange, deepDue, currentMonitors.Count);
-
-                        // Push the freshly enriched list into the manager's cache so any consumer
-                        // that calls GetCurrentMonitorsAsync afterwards (workspace UI, blackout
-                        // overlay placement, dim service) sees the updated capabilities instead
-                        // of the stale boot-time snapshot.
-                        _monitorInfoManager.UpdateCachedMonitors(currentMonitors);
-
-                        var oldMonitors = _lastKnownMonitors;
-                        _lastKnownMonitors = currentMonitors;
-                        _mediator.SendAsync(new SynchronizeMonitorStateCommand(oldMonitors, currentMonitors));
-                    }
+                    // Phantom display flapping. Skip — the next poll inside the window will
+                    // simply find the device-name set unchanged again.
+                    return;
                 }
+
+                EnrichMonitorInfoList(currentMonitors);
+                DispatchResync(currentMonitors, "basic poll detected device-name change");
             }
+        }
+
+        private void BootRevalidateElapsed(object? sender, ElapsedEventArgs e)
+        {
+            lock (_lock)
+            {
+                var currentMonitors = _monitorInfoManager.GetLatestMonitorsBasicInfo();
+                EnrichMonitorInfoList(currentMonitors);
+
+                if (AreEnrichedMonitorListsEqual(_lastKnownMonitors, currentMonitors))
+                {
+                    Log.Debug("Boot deep re-validate: no capability changes.");
+                    return;
+                }
+
+                DispatchResync(currentMonitors, "boot deep re-validate found DDC/CI or HardwareId change");
+            }
+        }
+
+        private void DispatchResync(List<MonitorInfo> currentMonitors, string reason)
+        {
+            Log.Information("Monitor state changed ({Reason}). Re-syncing {Count} monitors.", reason, currentMonitors.Count);
+
+            // Push the freshly enriched list into the manager's cache so any consumer
+            // calling GetCurrentMonitorsAsync afterwards (workspace UI, blackout overlay
+            // placement, dim service) sees the updated capabilities instead of the stale
+            // boot-time snapshot.
+            _monitorInfoManager.UpdateCachedMonitors(currentMonitors);
+
+            var oldMonitors = _lastKnownMonitors;
+            _lastKnownMonitors = currentMonitors;
+            _lastResyncUtc = DateTime.UtcNow;
+            _mediator.SendAsync(new SynchronizeMonitorStateCommand(oldMonitors, currentMonitors));
         }
 
         /// <summary>
