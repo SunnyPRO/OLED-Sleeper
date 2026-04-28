@@ -28,12 +28,7 @@ namespace OLED_Sleeper.Features.MonitorState.Services
     {
         #region Fields
 
-        // One-shot deferred deep re-validate runs ~90s after initial sync. Catches the
-        // cold-boot DDC/CI=false→true flip without any periodic churn.
         private const double BootDeepRevalidateMs = 90_000;
-
-        // Floor between consecutive resyncs. Phantom virtual displays flapping faster than
-        // this won't restart idle detection.
         private const double MinResyncIntervalMs = 30_000;
 
         private readonly IMonitorInfoManager _monitorInfoManager;
@@ -41,12 +36,14 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         private readonly Timer _pollTimer;
         private readonly Timer _bootRevalidateTimer;
         private readonly object _lock = new();
+
+        // Touched only under _lock, except _isPollRunning which is Interlocked-guarded.
         private IReadOnlyList<MonitorInfo> _lastKnownMonitors = Array.Empty<MonitorInfo>();
         private DateTime _lastResyncUtc = DateTime.MinValue;
+        private int _isPollRunning;
+        private bool _isStopped;
 
         #endregion Fields
-
-        #region Constructor
 
         public MonitorStateWatcher(IMonitorInfoManager monitorInfoManager, IMediator mediator, double pollIntervalMs = 2000)
         {
@@ -60,14 +57,13 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             _bootRevalidateTimer.Elapsed += BootRevalidateElapsed;
         }
 
-        #endregion Constructor
-
         #region Public Methods
 
         public void Start()
         {
             lock (_lock)
             {
+                _isStopped = false;
                 if (!_pollTimer.Enabled)
                 {
                     RetrieveInitialMonitorList();
@@ -79,6 +75,7 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         {
             lock (_lock)
             {
+                _isStopped = true;
                 _pollTimer.Stop();
                 _bootRevalidateTimer.Stop();
             }
@@ -100,18 +97,18 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             handler = (sender, monitors) =>
             {
                 _monitorInfoManager.MonitorListReady -= handler;
-                _lastKnownMonitors = monitors;
-                _lastResyncUtc = DateTime.UtcNow;
-                _mediator.SendAsync(new SynchronizeMonitorStateCommand([], _lastKnownMonitors));
-                _pollTimer.Start();
-
-                // Only schedule the boot re-validate when we are actually still in the
-                // boot-settle window. After that, drivers are stable and any later DDC/CI
-                // change will arrive via PowerEventMonitor (resume/unlock) or a real
-                // device-name change picked up by the basic poll.
-                if (Environment.TickCount64 < 120_000)
+                lock (_lock)
                 {
-                    _bootRevalidateTimer.Start();
+                    if (_isStopped) return;
+                    _lastKnownMonitors = FilterManageableMonitors(monitors);
+                    _lastResyncUtc = DateTime.UtcNow;
+                    _mediator.SendAsync(new SynchronizeMonitorStateCommand([], _lastKnownMonitors));
+                    _pollTimer.Start();
+
+                    if (Environment.TickCount64 < 120_000)
+                    {
+                        _bootRevalidateTimer.Start();
+                    }
                 }
             };
             _monitorInfoManager.MonitorListReady += handler;
@@ -120,59 +117,126 @@ namespace OLED_Sleeper.Features.MonitorState.Services
 
         private void PollTimerElapsed(object? sender, ElapsedEventArgs e)
         {
+            // Reject re-entry. A poll that overruns its interval (DDC enumeration takes
+            // ~3s/monitor) must not stack on the threadpool — that pile-up was part of the
+            // freeze symptom.
+            if (Interlocked.Exchange(ref _isPollRunning, 1) == 1) return;
+            try
+            {
+                RunBasicPoll();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "MonitorStateWatcher basic poll failed.");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isPollRunning, 0);
+            }
+        }
+
+        private void RunBasicPoll()
+        {
+            // Take a quick snapshot under the lock, then do slow work outside.
+            IReadOnlyList<MonitorInfo> lastKnownSnapshot;
+            DateTime lastResyncSnapshot;
             lock (_lock)
             {
-                var currentMonitors = _monitorInfoManager.GetLatestMonitorsBasicInfo();
-                if (AreBasicMonitorListsEqual(_lastKnownMonitors, currentMonitors)) return;
-
-                if ((DateTime.UtcNow - _lastResyncUtc).TotalMilliseconds < MinResyncIntervalMs)
-                {
-                    // Phantom display flapping. Skip — the next poll inside the window will
-                    // simply find the device-name set unchanged again.
-                    return;
-                }
-
-                EnrichMonitorInfoList(currentMonitors);
-                DispatchResync(currentMonitors, "basic poll detected device-name change");
+                if (_isStopped) return;
+                lastKnownSnapshot = _lastKnownMonitors;
+                lastResyncSnapshot = _lastResyncUtc;
             }
+
+            var basicCurrent = _monitorInfoManager.GetLatestMonitorsBasicInfo();
+            if (AreBasicMonitorListsEqual(lastKnownSnapshot, basicCurrent)) return;
+
+            if ((DateTime.UtcNow - lastResyncSnapshot).TotalMilliseconds < MinResyncIntervalMs)
+            {
+                // Phantom virtual-display flap. Don't touch idle detection.
+                return;
+            }
+
+            // DDC enrichment is slow (seconds per monitor). Run it WITHOUT the lock so
+            // Stop()/Start() and the boot revalidate timer can proceed.
+            EnrichMonitorInfoList(basicCurrent);
+            var manageable = FilterManageableMonitors(basicCurrent);
+
+            CommitResync(manageable, lastKnownSnapshot, "basic poll detected device-name change");
         }
 
         private void BootRevalidateElapsed(object? sender, ElapsedEventArgs e)
         {
-            lock (_lock)
+            try
             {
-                var currentMonitors = _monitorInfoManager.GetLatestMonitorsBasicInfo();
-                EnrichMonitorInfoList(currentMonitors);
+                IReadOnlyList<MonitorInfo> lastKnownSnapshot;
+                lock (_lock)
+                {
+                    if (_isStopped) return;
+                    lastKnownSnapshot = _lastKnownMonitors;
+                }
 
-                if (AreEnrichedMonitorListsEqual(_lastKnownMonitors, currentMonitors))
+                var current = _monitorInfoManager.GetLatestMonitorsBasicInfo();
+                EnrichMonitorInfoList(current);
+                var manageable = FilterManageableMonitors(current);
+
+                if (AreEnrichedMonitorListsEqual(lastKnownSnapshot, manageable))
                 {
                     Log.Debug("Boot deep re-validate: no capability changes.");
                     return;
                 }
 
-                DispatchResync(currentMonitors, "boot deep re-validate found DDC/CI or HardwareId change");
+                CommitResync(manageable, lastKnownSnapshot, "boot deep re-validate found DDC/CI or HardwareId change");
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "MonitorStateWatcher boot revalidate failed.");
             }
         }
 
-        private void DispatchResync(List<MonitorInfo> currentMonitors, string reason)
+        private void CommitResync(List<MonitorInfo> manageable, IReadOnlyList<MonitorInfo> oldSnapshot, string reason)
         {
-            Log.Information("Monitor state changed ({Reason}). Re-syncing {Count} monitors.", reason, currentMonitors.Count);
+            // Re-check stop + concurrent updates under the lock before publishing.
+            lock (_lock)
+            {
+                if (_isStopped) return;
+                if (!ReferenceEquals(_lastKnownMonitors, oldSnapshot))
+                {
+                    // Another path (e.g. the boot revalidate) raced ahead while we were
+                    // doing the slow DDC enumeration. Drop our (now stale) result.
+                    return;
+                }
 
-            // Push the freshly enriched list into the manager's cache so any consumer
-            // calling GetCurrentMonitorsAsync afterwards (workspace UI, blackout overlay
-            // placement, dim service) sees the updated capabilities instead of the stale
-            // boot-time snapshot.
-            _monitorInfoManager.UpdateCachedMonitors(currentMonitors);
+                Log.Information("Monitor state changed ({Reason}). Re-syncing {Count} monitors.", reason, manageable.Count);
 
-            var oldMonitors = _lastKnownMonitors;
-            _lastKnownMonitors = currentMonitors;
-            _lastResyncUtc = DateTime.UtcNow;
-            _mediator.SendAsync(new SynchronizeMonitorStateCommand(oldMonitors, currentMonitors));
+                _monitorInfoManager.UpdateCachedMonitors(manageable);
+                _lastKnownMonitors = manageable;
+                _lastResyncUtc = DateTime.UtcNow;
+                _mediator.SendAsync(new SynchronizeMonitorStateCommand(oldSnapshot, manageable));
+            }
         }
 
         /// <summary>
-        /// Cheap comparison — just device-name set. Used to detect monitor connect/disconnect
-        /// without paying the cost of DDC/CI enumeration.
+        /// Drops monitors that cannot be managed (no HardwareId or no DeviceName). Phantom
+        /// virtual displays from iGPU bridges, RDP, and virtual cameras frequently appear in
+        /// <see cref="NativeMethods.EnumDisplayMonitors"/> with empty hardware IDs; the idle
+        /// detection service joins settings on HardwareId so they could never become active
+        /// anyway, and including them in comparisons just creates churn.
+        /// </summary>
+        internal static List<MonitorInfo> FilterManageableMonitors(IReadOnlyList<MonitorInfo> monitors)
+        {
+            var result = new List<MonitorInfo>(monitors.Count);
+            foreach (var m in monitors)
+            {
+                if (string.IsNullOrEmpty(m.DeviceName)) continue;
+                // HardwareId is only filled by the enricher. Pre-enrichment we keep them so
+                // the basic poll can still detect connect/disconnect by device name.
+                result.Add(m);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Cheap comparison — just device-name set.
         /// </summary>
         internal static bool AreBasicMonitorListsEqual(IReadOnlyList<MonitorInfo>? a, IReadOnlyList<MonitorInfo>? b)
         {
@@ -184,9 +248,7 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         }
 
         /// <summary>
-        /// Full comparison including HardwareId and DDC/CI support. Catches the case where
-        /// the device-name set is unchanged but the underlying capabilities flipped (e.g.
-        /// DDC/CI reported <c>false</c> at boot then <c>true</c> after the driver settles).
+        /// Full comparison including HardwareId and DDC/CI support.
         /// </summary>
         internal static bool AreEnrichedMonitorListsEqual(IReadOnlyList<MonitorInfo>? a, IReadOnlyList<MonitorInfo>? b)
         {
