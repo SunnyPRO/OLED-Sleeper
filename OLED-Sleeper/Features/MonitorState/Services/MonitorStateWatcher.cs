@@ -199,6 +199,7 @@ namespace OLED_Sleeper.Features.MonitorState.Services
                 var current = _monitorInfoManager.GetLatestMonitorsBasicInfo();
                 EnrichMonitorInfoList(current);
                 var manageable = FilterManageableMonitors(current);
+                PreserveKnownDdcSupport(lastKnownSnapshot, manageable);
 
                 lock (_lock)
                 {
@@ -284,6 +285,31 @@ namespace OLED_Sleeper.Features.MonitorState.Services
                 if (m.DeviceName == null) continue;
                 if (manageableNames.Contains(m.DeviceName)) continue;
                 _knownPhantomDeviceNames.Add(m.DeviceName);
+            }
+        }
+
+        /// <summary>
+        /// DDC/CI probes can transiently fail while a monitor is dimmed/off or while the
+        /// display driver is still settling. The boot revalidate exists to detect the
+        /// important improvement case (false -> true), not to downgrade an already-known
+        /// working monitor to false and restart idle detection mid-cycle.
+        /// </summary>
+        private static void PreserveKnownDdcSupport(IReadOnlyList<MonitorInfo> previous, List<MonitorInfo> current)
+        {
+            var previouslySupported = previous
+                .Where(m => m.IsDdcCiSupported && !string.IsNullOrEmpty(m.DeviceName) && !string.IsNullOrEmpty(m.HardwareId))
+                .Select(m => $"{m.DeviceName}|{m.HardwareId}")
+                .ToHashSet();
+
+            foreach (var monitor in current)
+            {
+                if (monitor.IsDdcCiSupported) continue;
+                if (string.IsNullOrEmpty(monitor.DeviceName) || string.IsNullOrEmpty(monitor.HardwareId)) continue;
+
+                if (previouslySupported.Contains($"{monitor.DeviceName}|{monitor.HardwareId}"))
+                {
+                    monitor.IsDdcCiSupported = true;
+                }
             }
         }
 
