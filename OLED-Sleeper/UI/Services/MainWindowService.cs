@@ -98,7 +98,7 @@ namespace OLED_Sleeper.UI.Services
                 Log.Error(ex, "Failed to show main window; keeping app in tray.");
                 if (_currentWindow != null)
                 {
-                    try { _currentWindow.Close(); } catch { /* best effort */ }
+                    try { _currentWindow.CloseWithoutConfirmation(); } catch { /* best effort */ }
                     _currentWindow = null;
                     if (ReferenceEquals(Application.Current.MainWindow, null) == false)
                     {

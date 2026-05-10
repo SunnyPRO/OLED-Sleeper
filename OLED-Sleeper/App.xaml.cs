@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Threading;
 using OLED_Sleeper.Infrastructure;
 using Serilog;
+using System.ComponentModel;
 
 namespace OLED_Sleeper
 {
@@ -78,6 +79,31 @@ namespace OLED_Sleeper
         private static void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
         {
             Log.Error(e.Exception, "Unhandled exception on UI dispatcher; swallowing to keep tray app alive.");
+
+            if (e.Exception is Win32Exception { NativeErrorCode: 1816 })
+            {
+                // WPF can enter a repeated HwndTarget.UpdateWindowSettings/PostMessage
+                // failure loop when the desktop heap/user quota is exhausted. Swallowing
+                // keeps the process alive, but the visible settings window is then frozen.
+                // Close it so the tray app survives and the user can retry later.
+                try
+                {
+                    if (Application.Current.MainWindow is MainWindow mainWindow)
+                    {
+                        mainWindow.CloseWithoutConfirmation();
+                    }
+                    else
+                    {
+                        Application.Current.MainWindow?.Close();
+                    }
+                    Application.Current.MainWindow = null;
+                }
+                catch (Exception closeException)
+                {
+                    Log.Warning(closeException, "Failed to close main window after dispatcher quota exception.");
+                }
+            }
+
             e.Handled = true;
         }
 

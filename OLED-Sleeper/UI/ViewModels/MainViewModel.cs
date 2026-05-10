@@ -340,6 +340,12 @@ namespace OLED_Sleeper.UI.ViewModels
 
         private void OnWorkspaceReady(object? sender, ObservableCollection<MonitorLayoutViewModel> newMonitorLayoutViewModels)
         {
+            if (!Application.Current.Dispatcher.CheckAccess())
+            {
+                Application.Current.Dispatcher.Invoke(() => OnWorkspaceReady(sender, newMonitorLayoutViewModels));
+                return;
+            }
+
             PopulateMonitors(newMonitorLayoutViewModels);
             RestoreSelection();
             CheckDirtyState();
@@ -352,12 +358,6 @@ namespace OLED_Sleeper.UI.ViewModels
         /// <param name="newViewModels">The new monitor layout view models.</param>
         private void PopulateMonitors(ObservableCollection<MonitorLayoutViewModel> newViewModels)
         {
-            if (!Application.Current.Dispatcher.CheckAccess())
-            {
-                Application.Current.Dispatcher.Invoke(() => PopulateMonitors(newViewModels));
-                return;
-            }
-
             Monitors.Clear();
             foreach (var viewModel in newViewModels)
             {

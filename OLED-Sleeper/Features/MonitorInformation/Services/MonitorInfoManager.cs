@@ -13,7 +13,7 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
         #region Fields
 
         private readonly IMonitorInfoProvider _monitorInfoProvider;
-        private List<MonitorInfo> _cachedMonitors;
+        private List<MonitorInfo>? _cachedMonitors;
         private readonly object _lock = new object();
         private Task? _refreshTask;
 
@@ -24,7 +24,7 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
         /// <summary>
         /// Raised when the monitor list has been retrieved and enriched.
         /// </summary>
-        public event EventHandler<IReadOnlyList<MonitorInfo>> MonitorListReady;
+        public event EventHandler<IReadOnlyList<MonitorInfo>>? MonitorListReady;
 
         #endregion Events
 
@@ -50,28 +50,26 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
         /// </summary>
         public void GetCurrentMonitorsAsync()
         {
+            IReadOnlyList<MonitorInfo>? cachedMonitors;
             lock (_lock)
             {
                 if (_cachedMonitors != null)
                 {
-                    MonitorListReady?.Invoke(this, _cachedMonitors);
-                    return;
+                    cachedMonitors = _cachedMonitors;
                 }
-                if (_refreshTask != null)
+                else if (_refreshTask != null)
                 {
                     Log.Debug("MonitorInfoManager: Refresh already in progress, skipping duplicate native call.");
                     return;
                 }
-                _refreshTask = Task.Run(() =>
+                else
                 {
-                    RefreshMonitorsInternal();
-                    lock (_lock)
-                    {
-                        MonitorListReady?.Invoke(this, _cachedMonitors);
-                        _refreshTask = null; // Allow future refreshes if needed
-                    }
-                });
+                    _refreshTask = Task.Run(RefreshMonitorsWorker);
+                    return;
+                }
             }
+
+            PublishMonitorList(cachedMonitors);
         }
 
         /// <summary>
@@ -81,15 +79,17 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
         /// </summary>
         public void RefreshMonitorsAsync()
         {
-            Task.Run(() =>
+            lock (_lock)
             {
-                lock (_lock)
+                if (_refreshTask != null)
                 {
-                    Log.Information("Manual refresh requested. Re-scanning monitors.");
-                    RefreshMonitorsInternal();
-                    MonitorListReady?.Invoke(this, _cachedMonitors);
+                    Log.Debug("MonitorInfoManager: Refresh already in progress, skipping duplicate manual refresh.");
+                    return;
                 }
-            });
+
+                Log.Information("Manual refresh requested. Re-scanning monitors.");
+                _refreshTask = Task.Run(RefreshMonitorsWorker);
+            }
         }
 
         /// <summary>
@@ -132,11 +132,52 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
         /// <summary>
         /// Refreshes the monitor cache by retrieving basic info and enriching each monitor with DDC/CI support and hardware ID.
         /// </summary>
-        private void RefreshMonitorsInternal()
+        private List<MonitorInfo> RefreshMonitorsInternal()
         {
             var monitors = _monitorInfoProvider.GetAllMonitorsBasicInfo();
             EnrichMonitorInfoList(monitors);
-            _cachedMonitors = monitors;
+            return monitors;
+        }
+
+        private void RefreshMonitorsWorker()
+        {
+            try
+            {
+                var monitors = RefreshMonitorsInternal();
+                lock (_lock)
+                {
+                    _cachedMonitors = monitors;
+                    _refreshTask = null;
+                }
+
+                PublishMonitorList(monitors);
+            }
+            catch (Exception ex)
+            {
+                lock (_lock)
+                {
+                    _refreshTask = null;
+                }
+                Log.Error(ex, "MonitorInfoManager refresh failed.");
+            }
+        }
+
+        private void PublishMonitorList(IReadOnlyList<MonitorInfo> monitors)
+        {
+            var handlers = MonitorListReady?.GetInvocationList();
+            if (handlers == null) return;
+
+            foreach (EventHandler<IReadOnlyList<MonitorInfo>> handler in handlers)
+            {
+                try
+                {
+                    handler(this, monitors);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "MonitorListReady subscriber failed.");
+                }
+            }
         }
 
         #endregion Private Methods

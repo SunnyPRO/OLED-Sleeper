@@ -11,6 +11,8 @@ namespace OLED_Sleeper
     /// </summary>
     public partial class MainWindow : Window
     {
+        private bool _skipCloseConfirmation;
+
         #region Constructor
 
         /// <summary>
@@ -23,6 +25,17 @@ namespace OLED_Sleeper
 
         #endregion Constructor
 
+        /// <summary>
+        /// Closes the settings window without asking about unsaved changes. Used only for
+        /// emergency recovery paths where WPF itself is failing to render/update the window
+        /// and showing another dialog would make the failure loop worse.
+        /// </summary>
+        public void CloseWithoutConfirmation()
+        {
+            _skipCloseConfirmation = true;
+            Close();
+        }
+
         #region Window Event Overrides
 
         /// <summary>
@@ -32,6 +45,12 @@ namespace OLED_Sleeper
         /// <param name="e">CancelEventArgs for the closing event.</param>
         protected override void OnClosing(CancelEventArgs e)
         {
+            if (_skipCloseConfirmation)
+            {
+                base.OnClosing(e);
+                return;
+            }
+
             if (DataContext is MainViewModel viewModel && !viewModel.OnWindowClosing())
             {
                 e.Cancel = true;
