@@ -38,7 +38,7 @@ namespace OLED_Sleeper.Features.MonitorDimming.Services
             {
                 var alreadyTracked = _originalBrightnessLevels.ContainsKey(hardwareId);
                 var currentBrightness = GetCurrentBrightness(hPhysicalMonitor, hardwareId);
-                if (currentBrightness == uint.MaxValue) return;
+                if (currentBrightness == uint.MaxValue) return false;
 
                 if (!alreadyTracked)
                 {
@@ -49,7 +49,7 @@ namespace OLED_Sleeper.Features.MonitorDimming.Services
                     {
                         Log.Warning("Skip dim for monitor {HardwareId}: current brightness {Current} already at or below target {Target}. Not capturing as original.",
                             hardwareId, currentBrightness, clampedDim);
-                        return;
+                        return false;
                     }
                     SaveOriginalBrightness(hardwareId, currentBrightness);
                 }
@@ -58,27 +58,34 @@ namespace OLED_Sleeper.Features.MonitorDimming.Services
                     Log.Debug("Monitor {HardwareId} already has a captured original brightness; preserving it.", hardwareId);
                 }
 
-                SetMonitorBrightness(hPhysicalMonitor, hardwareId, clampedDim);
+                return SetMonitorBrightness(hPhysicalMonitor, hardwareId, clampedDim);
             });
         }
 
         /// <inheritdoc />
-        public async Task UndimMonitorAsync(string hardwareId)
+        public async Task<bool> UndimMonitorAsync(string hardwareId)
         {
             if (_originalBrightnessLevels.TryGetValue(hardwareId, out var originalBrightness))
             {
-                await RestoreBrightnessAsync(hardwareId, originalBrightness);
-                RemoveOriginalBrightness(hardwareId);
+                return await RestoreBrightnessAsync(hardwareId, originalBrightness);
             }
+            return true;
         }
 
         /// <inheritdoc />
-        public async Task RestoreBrightnessAsync(string hardwareId, uint originalBrightness)
+        public async Task<bool> RestoreBrightnessAsync(string hardwareId, uint originalBrightness)
         {
-            await WithPhysicalMonitorAsync(hardwareId, hPhysicalMonitor =>
+            var restored = await WithPhysicalMonitorAsync(hardwareId, hPhysicalMonitor =>
             {
-                SetMonitorBrightness(hPhysicalMonitor, hardwareId, originalBrightness, isRestore: true);
+                return SetMonitorBrightness(hPhysicalMonitor, hardwareId, originalBrightness, isRestore: true);
             });
+            if (restored &&
+                _originalBrightnessLevels.TryGetValue(hardwareId, out var trackedBrightness) &&
+                trackedBrightness == originalBrightness)
+            {
+                RemoveOriginalBrightness(hardwareId);
+            }
+            return restored;
         }
 
         /// <inheritdoc />
@@ -115,13 +122,13 @@ namespace OLED_Sleeper.Features.MonitorDimming.Services
         /// </summary>
         /// <param name="hardwareId">The hardware ID of the monitor.</param>
         /// <param name="action">The action to perform with the monitor handle.</param>
-        private async Task WithPhysicalMonitorAsync(string hardwareId, Action<nint> action)
+        private async Task<bool> WithPhysicalMonitorAsync(string hardwareId, Func<nint, bool> action)
         {
             var hMonitor = await FindMonitorHandleByHardwareIdAsync(hardwareId);
             if (hMonitor == nint.Zero)
             {
                 Log.Warning("Could not find monitor handle for HardwareId {HardwareId}.", hardwareId);
-                return;
+                return false;
             }
 
             var physicalMonitors = new NativeMethods.PHYSICAL_MONITOR[1];
@@ -130,7 +137,7 @@ namespace OLED_Sleeper.Features.MonitorDimming.Services
                 var hPhysicalMonitor = physicalMonitors[0].hPhysicalMonitor;
                 try
                 {
-                    action(hPhysicalMonitor);
+                    return action(hPhysicalMonitor);
                 }
                 finally
                 {
@@ -140,6 +147,7 @@ namespace OLED_Sleeper.Features.MonitorDimming.Services
             else
             {
                 Log.Warning("Could not get physical monitor from HMONITOR for HardwareId {HardwareId}.", hardwareId);
+                return false;
             }
         }
 
@@ -214,7 +222,7 @@ namespace OLED_Sleeper.Features.MonitorDimming.Services
         /// <param name="hardwareId">The hardware ID of the monitor.</param>
         /// <param name="brightness">The brightness value to set.</param>
         /// <param name="isRestore">True if restoring, false if dimming.</param>
-        private void SetMonitorBrightness(nint hPhysicalMonitor, string hardwareId, uint brightness, bool isRestore = false)
+        private bool SetMonitorBrightness(nint hPhysicalMonitor, string hardwareId, uint brightness, bool isRestore = false)
         {
             if (NativeMethods.SetVCPFeature(hPhysicalMonitor, NativeMethods.VCP_CODE_BRIGHTNESS, brightness))
             {
@@ -226,11 +234,13 @@ namespace OLED_Sleeper.Features.MonitorDimming.Services
                 {
                     Log.Information("Successfully dimmed monitor {HardwareId} to {DimLevel}%.", hardwareId, brightness);
                 }
+                return true;
             }
             else
             {
                 var action = isRestore ? "restore brightness on" : "dim";
                 Log.Warning("Failed to {Action} monitor {HardwareId}.", action, hardwareId);
+                return false;
             }
         }
 

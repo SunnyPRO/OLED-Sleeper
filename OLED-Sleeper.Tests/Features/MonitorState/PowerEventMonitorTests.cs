@@ -1,6 +1,7 @@
 using Moq;
 using OLED_Sleeper.Core.Interfaces;
 using OLED_Sleeper.Features.MonitorDimming.Commands;
+using OLED_Sleeper.Features.MonitorInformation.Models;
 using OLED_Sleeper.Features.MonitorIdleDetection.Services.Interfaces;
 using OLED_Sleeper.Features.MonitorInformation.Services.Interfaces;
 using OLED_Sleeper.Features.MonitorState.Services;
@@ -27,15 +28,26 @@ namespace OLED_Sleeper.Tests.Features.MonitorState
         }
 
         [Fact]
-        public void HandleResume_RefreshesMonitors_ReappliesIdleSettings_AndRestoresBrightness()
+        public async Task HandleResume_WaitsForMonitorRefreshBeforeReapplyingSettingsAndRestoringBrightness()
         {
             var persisted = new List<MonitorSettings>
             {
                 new() { HardwareId = "MON-1", IsManaged = true }
             };
             _settingsFile.Setup(s => s.LoadSettings()).Returns(persisted);
+            var refreshRequested = false;
+            _monitorInfoManager
+                .Setup(m => m.RefreshMonitorsAsync())
+                .Callback(() => refreshRequested = true);
 
-            _sut.HandleResume();
+            var resyncTask = _sut.HandleResumeAsync();
+
+            Assert.True(refreshRequested);
+            _idleDetection.Verify(i => i.UpdateSettings(It.IsAny<List<MonitorSettings>>()), Times.Never);
+            _mediator.Verify(m => m.SendAsync(It.IsAny<RestoreBrightnessOnAllMonitorsCommand>()), Times.Never);
+
+            _monitorInfoManager.Raise(m => m.MonitorListReady += null, _monitorInfoManager.Object, new List<MonitorInfo>());
+            await resyncTask;
 
             _monitorInfoManager.Verify(m => m.RefreshMonitorsAsync(), Times.Once);
             _idleDetection.Verify(i => i.UpdateSettings(persisted), Times.Once);

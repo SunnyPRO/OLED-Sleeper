@@ -263,7 +263,11 @@ namespace OLED_Sleeper.Features.MonitorState.Services
                 if (string.IsNullOrEmpty(m.HardwareId)) continue;
                 result.Add(m);
             }
-            return result;
+            return result
+                .OrderBy(m => m.DisplayNumber < 0 ? int.MaxValue : m.DisplayNumber)
+                .ThenBy(m => m.Bounds.Left)
+                .ThenBy(m => m.Bounds.Top)
+                .ToList();
         }
 
         /// <summary>
@@ -320,9 +324,12 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         {
             if (a == null || b == null) return false;
             if (a.Count != b.Count) return false;
-            var aNames = new HashSet<string>(a.Select(m => m.DeviceName).OfType<string>());
-            var bNames = new HashSet<string>(b.Select(m => m.DeviceName).OfType<string>());
-            return aNames.SetEquals(bNames);
+            string Key(MonitorInfo m) =>
+                $"{m.DeviceName ?? string.Empty}|{m.Bounds.Left:0.###},{m.Bounds.Top:0.###},{m.Bounds.Width:0.###},{m.Bounds.Height:0.###}|{m.DisplayNumber}";
+
+            var aKeys = new HashSet<string>(a.Select(Key));
+            var bKeys = new HashSet<string>(b.Select(Key));
+            return aKeys.SetEquals(bKeys);
         }
 
         /// <summary>
