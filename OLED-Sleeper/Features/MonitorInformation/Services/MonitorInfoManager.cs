@@ -15,7 +15,7 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
         private readonly IMonitorInfoProvider _monitorInfoProvider;
         private List<MonitorInfo>? _cachedMonitors;
         private readonly object _lock = new object();
-        private Task? _refreshTask;
+        private Task<List<MonitorInfo>>? _refreshTask;
 
         #endregion Fields
 
@@ -64,7 +64,7 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
                 }
                 else
                 {
-                    _refreshTask = Task.Run(RefreshMonitorsWorker);
+                    _ = ObserveRefreshFailureAsync(StartRefreshTaskLocked());
                     return;
                 }
             }
@@ -75,21 +75,59 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
         /// <summary>
         /// Forces a refresh of the monitor list from the system asynchronously.
         /// The refresh is performed on a background thread, and subscribers will be notified via <see cref="MonitorListReady"/> when the list is available.
-        /// This method is event-driven and does not return a Task.
         /// </summary>
-        public void RefreshMonitorsAsync()
+        public async Task<IReadOnlyList<MonitorInfo>> RefreshMonitorsAsync(CancellationToken cancellationToken = default)
         {
+            Task<List<MonitorInfo>> refreshTask;
             lock (_lock)
             {
                 if (_refreshTask != null)
                 {
-                    Log.Debug("MonitorInfoManager: Refresh already in progress, skipping duplicate manual refresh.");
-                    return;
+                    Log.Debug("MonitorInfoManager: Refresh already in progress, joining existing native call.");
+                    refreshTask = _refreshTask;
                 }
-
-                Log.Information("Manual refresh requested. Re-scanning monitors.");
-                _refreshTask = Task.Run(RefreshMonitorsWorker);
+                else
+                {
+                    Log.Information("Manual refresh requested. Re-scanning monitors.");
+                    refreshTask = StartRefreshTaskLocked();
+                }
             }
+
+            return await WaitForRefreshAsync(refreshTask, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <inheritdoc />
+        public async Task<IReadOnlyList<MonitorInfo>> ForceRefreshMonitorsAsync(CancellationToken cancellationToken = default)
+        {
+            Task<List<MonitorInfo>>? inProgress;
+            Task<List<MonitorInfo>> refreshTask;
+            lock (_lock)
+            {
+                inProgress = _refreshTask;
+            }
+
+            if (inProgress != null)
+            {
+                try
+                {
+                    await WaitForRefreshAsync(inProgress, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug(ex, "Existing monitor refresh failed before forced refresh; starting a new scan.");
+                }
+            }
+
+            lock (_lock)
+            {
+                refreshTask = _refreshTask ?? StartRefreshTaskLocked();
+            }
+
+            return await WaitForRefreshAsync(refreshTask, cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -139,26 +177,67 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
             return monitors;
         }
 
-        private void RefreshMonitorsWorker()
+        private Task<List<MonitorInfo>> StartRefreshTaskLocked()
+        {
+            _refreshTask = RefreshMonitorsWorkerAsync();
+            return _refreshTask;
+        }
+
+        private static async Task ObserveRefreshFailureAsync(Task refreshTask)
         {
             try
             {
-                var monitors = RefreshMonitorsInternal();
+                await refreshTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // RefreshMonitorsWorkerAsync already logs the failure. This observer prevents
+                // fire-and-forget GetCurrentMonitorsAsync calls from leaving an unobserved fault.
+            }
+        }
+
+        private static async Task<IReadOnlyList<MonitorInfo>> WaitForRefreshAsync(
+            Task<List<MonitorInfo>> refreshTask,
+            CancellationToken cancellationToken)
+        {
+            if (!cancellationToken.CanBeCanceled)
+            {
+                return await refreshTask.ConfigureAwait(false);
+            }
+
+            var completed = await Task.WhenAny(refreshTask, Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)).ConfigureAwait(false);
+            if (completed != refreshTask)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+
+            return await refreshTask.ConfigureAwait(false);
+        }
+
+        private async Task<List<MonitorInfo>> RefreshMonitorsWorkerAsync()
+        {
+            try
+            {
+                var monitors = await Task.Run(RefreshMonitorsInternal).ConfigureAwait(false);
                 lock (_lock)
                 {
                     _cachedMonitors = monitors;
-                    _refreshTask = null;
                 }
 
                 PublishMonitorList(monitors);
+                return monitors;
             }
             catch (Exception ex)
+            {
+                Log.Error(ex, "MonitorInfoManager refresh failed.");
+                throw;
+            }
+            finally
             {
                 lock (_lock)
                 {
                     _refreshTask = null;
                 }
-                Log.Error(ex, "MonitorInfoManager refresh failed.");
             }
         }
 

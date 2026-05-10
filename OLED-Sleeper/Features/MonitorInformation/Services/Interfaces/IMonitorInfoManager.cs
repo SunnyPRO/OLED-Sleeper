@@ -22,9 +22,19 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services.Interfaces
         /// <summary>
         /// Forces a refresh of the monitor list from the system asynchronously.
         /// The refresh is performed on a background thread, and subscribers will be notified via <see cref="MonitorListReady"/> when the list is available.
-        /// This method is event-driven and does not return a Task.
         /// </summary>
-        void RefreshMonitorsAsync();
+        /// <param name="cancellationToken">Cancels waiting for the refresh result; the native refresh may continue in the background.</param>
+        /// <returns>The freshly enumerated and enriched monitor list.</returns>
+        Task<IReadOnlyList<MonitorInfo>> RefreshMonitorsAsync(CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Waits for any current refresh to finish, then performs or joins the next refresh that
+        /// starts after this request. Use this after power/display transitions where pre-existing
+        /// monitor handles may be stale.
+        /// </summary>
+        /// <param name="cancellationToken">Cancels waiting for the refresh result; the native refresh may continue in the background.</param>
+        /// <returns>The freshly enumerated and enriched monitor list.</returns>
+        Task<IReadOnlyList<MonitorInfo>> ForceRefreshMonitorsAsync(CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Gets the latest, up-to-date list of monitors from the system (basic info only, no enrichment).

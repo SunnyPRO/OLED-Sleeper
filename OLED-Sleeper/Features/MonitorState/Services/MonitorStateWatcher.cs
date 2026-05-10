@@ -1,3 +1,4 @@
+using Microsoft.Win32;
 using OLED_Sleeper.Core.Interfaces;
 using OLED_Sleeper.Features.MonitorInformation.Models;
 using OLED_Sleeper.Features.MonitorInformation.Services.Interfaces;
@@ -30,6 +31,7 @@ namespace OLED_Sleeper.Features.MonitorState.Services
 
         private const double BootDeepRevalidateMs = 90_000;
         private const double MinResyncIntervalMs = 30_000;
+        private const int DisplayChangeRevalidateDelayMs = 3_000;
 
         private readonly IMonitorInfoManager _monitorInfoManager;
         private readonly IMediator _mediator;
@@ -46,6 +48,9 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         // enumeration every time they flap.
         private HashSet<string> _knownPhantomDeviceNames = new();
         private int _isPollRunning;
+        private int _isDeepRevalidateRunning;
+        private int _isDisplayChangeRevalidateScheduled;
+        private bool _isDisplaySettingsSubscribed;
         private bool _isStopped;
 
         #endregion Fields
@@ -69,6 +74,11 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             lock (_lock)
             {
                 _isStopped = false;
+                if (!_isDisplaySettingsSubscribed)
+                {
+                    SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+                    _isDisplaySettingsSubscribed = true;
+                }
                 if (!_pollTimer.Enabled)
                 {
                     RetrieveInitialMonitorList();
@@ -83,11 +93,17 @@ namespace OLED_Sleeper.Features.MonitorState.Services
                 _isStopped = true;
                 _pollTimer.Stop();
                 _bootRevalidateTimer.Stop();
+                if (_isDisplaySettingsSubscribed)
+                {
+                    SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+                    _isDisplaySettingsSubscribed = false;
+                }
             }
         }
 
         public void Dispose()
         {
+            Stop();
             _pollTimer?.Dispose();
             _bootRevalidateTimer?.Dispose();
         }
@@ -187,6 +203,39 @@ namespace OLED_Sleeper.Features.MonitorState.Services
 
         private void BootRevalidateElapsed(object? sender, ElapsedEventArgs e)
         {
+            RunDeepRevalidate("boot deep re-validate found DDC/CI or HardwareId change");
+        }
+
+        private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+        {
+            Log.Information("Display settings changed - scheduling monitor deep re-validate.");
+            if (Interlocked.Exchange(ref _isDisplayChangeRevalidateScheduled, 1) == 1)
+            {
+                return;
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(DisplayChangeRevalidateDelayMs);
+                    RunDeepRevalidate("display settings change found DDC/CI, HardwareId, or layout change");
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _isDisplayChangeRevalidateScheduled, 0);
+                }
+            });
+        }
+
+        private void RunDeepRevalidate(string reason)
+        {
+            if (Interlocked.Exchange(ref _isDeepRevalidateRunning, 1) == 1)
+            {
+                Log.Debug("MonitorStateWatcher deep revalidate already running; skipping duplicate request.");
+                return;
+            }
+
             try
             {
                 IReadOnlyList<MonitorInfo> lastKnownSnapshot;
@@ -209,15 +258,19 @@ namespace OLED_Sleeper.Features.MonitorState.Services
 
                 if (AreEnrichedMonitorListsEqual(lastKnownSnapshot, manageable))
                 {
-                    Log.Debug("Boot deep re-validate: no capability changes.");
+                    Log.Debug("Monitor deep re-validate: no capability changes.");
                     return;
                 }
 
-                CommitResync(manageable, lastKnownSnapshot, "boot deep re-validate found DDC/CI or HardwareId change");
+                CommitResync(manageable, lastKnownSnapshot, reason);
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "MonitorStateWatcher boot revalidate failed.");
+                Log.Error(ex, "MonitorStateWatcher deep revalidate failed.");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isDeepRevalidateRunning, 0);
             }
         }
 

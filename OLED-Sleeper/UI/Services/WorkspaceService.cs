@@ -68,7 +68,7 @@ namespace OLED_Sleeper.UI.Services
                 BuildWorkspaceAsync(containerWidth, containerHeight);
             }
             _monitorManager.MonitorListReady += Handler;
-            _monitorManager.RefreshMonitorsAsync();
+            _ = RefreshMonitorsSafelyAsync();
         }
 
         /// <summary>
@@ -86,6 +86,19 @@ namespace OLED_Sleeper.UI.Services
                     viewModel.Configuration.ApplySettings(setting);
                     viewModel.Configuration.MarkAsSaved();
                 }
+            }
+        }
+
+        private async Task RefreshMonitorsSafelyAsync()
+        {
+            try
+            {
+                await _monitorManager.RefreshMonitorsAsync();
+            }
+            catch
+            {
+                // MonitorInfoManager already logs refresh failures. Observe the task here so a
+                // failed user-initiated refresh does not become an unobserved task exception.
             }
         }
     }

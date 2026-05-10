@@ -2,7 +2,6 @@ using Microsoft.Win32;
 using OLED_Sleeper.Core;
 using OLED_Sleeper.Core.Interfaces;
 using OLED_Sleeper.Features.MonitorDimming.Commands;
-using OLED_Sleeper.Features.MonitorInformation.Models;
 using OLED_Sleeper.Features.MonitorInformation.Services.Interfaces;
 using OLED_Sleeper.Features.MonitorIdleDetection.Services.Interfaces;
 using OLED_Sleeper.Features.MonitorState.Services.Interfaces;
@@ -25,6 +24,7 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         private readonly IMonitorSettingsFileService _settingsFileService;
         private static readonly TimeSpan MonitorRefreshTimeout = TimeSpan.FromSeconds(12);
         private int _isResyncRunning;
+        private int _resyncAgainRequested;
         private bool _isStarted;
 
         public PowerEventMonitor(
@@ -124,62 +124,59 @@ namespace OLED_Sleeper.Features.MonitorState.Services
 
         private async Task ResyncMonitorStateAfterResumeAsync()
         {
-            if (Interlocked.Exchange(ref _isResyncRunning, 1) == 1)
+            if (Interlocked.CompareExchange(ref _isResyncRunning, 1, 0) != 0)
             {
-                Log.Debug("Resume monitor resync already in progress; skipping duplicate event.");
+                Interlocked.Exchange(ref _resyncAgainRequested, 1);
+                Log.Debug("Resume monitor resync already in progress; queued one follow-up pass.");
                 return;
             }
 
-            EventHandler<IReadOnlyList<MonitorInfo>>? handler = null;
             try
             {
-                var monitorRefreshReady = new TaskCompletionSource<IReadOnlyList<MonitorInfo>>(
-                    TaskCreationOptions.RunContinuationsAsynchronously);
-
-                handler = (_, monitors) =>
+                do
                 {
-                    _monitorInfoManager.MonitorListReady -= handler;
-                    monitorRefreshReady.TrySetResult(monitors);
-                };
-
-                // 1. Force a fresh enumeration and wait for it before restoring brightness.
-                //    Physical monitor handles from before the power transition may be stale.
-                _monitorInfoManager.MonitorListReady += handler;
-                _monitorInfoManager.RefreshMonitorsAsync();
-
-                var completed = await Task.WhenAny(monitorRefreshReady.Task, Task.Delay(MonitorRefreshTimeout));
-                if (completed == monitorRefreshReady.Task)
-                {
-                    var monitors = await monitorRefreshReady.Task;
-                    Log.Information("Resume monitor refresh completed with {Count} monitors.", monitors.Count);
-                }
-                else
-                {
-                    _monitorInfoManager.MonitorListReady -= handler;
-                    Log.Warning("Timed out waiting for resume monitor refresh after {TimeoutSeconds}s; using latest available monitor cache.",
-                        MonitorRefreshTimeout.TotalSeconds);
-                }
-
-                // 2. Re-apply idle detection settings so per-monitor state machines reset to Active.
-                var settings = _settingsFileService.LoadSettings();
-                _idleDetectionService.UpdateSettings(settings);
-
-                // 3. Restore any brightness entries still recorded on disk (covers the case where
-                //    the suspend-time undim never ran or failed because handles were invalidated).
-                await _mediator.SendAsync(new RestoreBrightnessOnAllMonitorsCommand());
+                    Interlocked.Exchange(ref _resyncAgainRequested, 0);
+                    await RunSingleResumeResyncAsync();
+                } while (Volatile.Read(ref _resyncAgainRequested) == 1);
             }
             catch (Exception ex)
             {
-                if (handler != null)
-                {
-                    _monitorInfoManager.MonitorListReady -= handler;
-                }
                 Log.Error(ex, "Failed to re-synchronize monitor state after resume.");
             }
             finally
             {
                 Interlocked.Exchange(ref _isResyncRunning, 0);
+                if (Interlocked.Exchange(ref _resyncAgainRequested, 0) == 1)
+                {
+                    _ = ResyncMonitorStateAfterResumeAsync();
+                }
             }
+        }
+
+        private async Task RunSingleResumeResyncAsync()
+        {
+            // 1. Force a fresh enumeration and wait for that specific native scan before
+            //    restoring brightness. Physical monitor handles from before the power
+            //    transition may be stale.
+            try
+            {
+                using var refreshTimeout = new CancellationTokenSource(MonitorRefreshTimeout);
+                var monitors = await _monitorInfoManager.ForceRefreshMonitorsAsync(refreshTimeout.Token);
+                Log.Information("Resume monitor refresh completed with {Count} monitors.", monitors.Count);
+            }
+            catch (OperationCanceledException)
+            {
+                Log.Warning("Timed out waiting for resume monitor refresh after {TimeoutSeconds}s; using latest available monitor cache.",
+                    MonitorRefreshTimeout.TotalSeconds);
+            }
+
+            // 2. Re-apply idle detection settings so per-monitor state machines reset to Active.
+            var settings = _settingsFileService.LoadSettings();
+            _idleDetectionService.UpdateSettings(settings);
+
+            // 3. Restore any brightness entries still recorded on disk (covers the case where
+            //    the suspend-time undim never ran or failed because handles were invalidated).
+            await _mediator.SendAsync(new RestoreBrightnessOnAllMonitorsCommand());
         }
 
         public void Dispose()

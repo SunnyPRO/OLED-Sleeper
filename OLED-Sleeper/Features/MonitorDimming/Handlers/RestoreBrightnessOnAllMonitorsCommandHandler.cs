@@ -28,6 +28,9 @@ namespace OLED_Sleeper.Features.MonitorDimming.Handlers
                         remaining[entry.Key] = entry.Value;
                     }
                 }
+                // Persist the authoritative result from this pass. The concrete dimming service
+                // may also clear its in-memory state on success, but this keeps file state correct
+                // even if it restored entries loaded by this handler after service construction.
                 monitorBrightnessStateService.SaveState(remaining);
             }
         }

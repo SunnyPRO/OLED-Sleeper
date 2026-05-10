@@ -34,11 +34,16 @@ namespace OLED_Sleeper.Tests.Features.MonitorState
             {
                 new() { HardwareId = "MON-1", IsManaged = true }
             };
+            var refreshCompletion = new TaskCompletionSource<IReadOnlyList<MonitorInfo>>(TaskCreationOptions.RunContinuationsAsynchronously);
             _settingsFile.Setup(s => s.LoadSettings()).Returns(persisted);
             var refreshRequested = false;
             _monitorInfoManager
-                .Setup(m => m.RefreshMonitorsAsync())
-                .Callback(() => refreshRequested = true);
+                .Setup(m => m.ForceRefreshMonitorsAsync(It.IsAny<CancellationToken>()))
+                .Callback(() => refreshRequested = true)
+                .Returns(refreshCompletion.Task);
+            _mediator
+                .Setup(m => m.SendAsync(It.IsAny<RestoreBrightnessOnAllMonitorsCommand>()))
+                .Returns(Task.CompletedTask);
 
             var resyncTask = _sut.HandleResumeAsync();
 
@@ -46,12 +51,46 @@ namespace OLED_Sleeper.Tests.Features.MonitorState
             _idleDetection.Verify(i => i.UpdateSettings(It.IsAny<List<MonitorSettings>>()), Times.Never);
             _mediator.Verify(m => m.SendAsync(It.IsAny<RestoreBrightnessOnAllMonitorsCommand>()), Times.Never);
 
-            _monitorInfoManager.Raise(m => m.MonitorListReady += null, _monitorInfoManager.Object, new List<MonitorInfo>());
+            refreshCompletion.SetResult(new List<MonitorInfo>());
             await resyncTask;
 
-            _monitorInfoManager.Verify(m => m.RefreshMonitorsAsync(), Times.Once);
+            _monitorInfoManager.Verify(m => m.ForceRefreshMonitorsAsync(It.IsAny<CancellationToken>()), Times.Once);
             _idleDetection.Verify(i => i.UpdateSettings(persisted), Times.Once);
             _mediator.Verify(m => m.SendAsync(It.IsAny<RestoreBrightnessOnAllMonitorsCommand>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task HandleResume_WhenDuplicateArrivesDuringRefresh_RunsQueuedFollowUp()
+        {
+            var persisted = new List<MonitorSettings>
+            {
+                new() { HardwareId = "MON-1", IsManaged = true }
+            };
+            var firstRefresh = new TaskCompletionSource<IReadOnlyList<MonitorInfo>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondRefresh = new TaskCompletionSource<IReadOnlyList<MonitorInfo>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var refreshCalls = 0;
+
+            _settingsFile.Setup(s => s.LoadSettings()).Returns(persisted);
+            _monitorInfoManager
+                .Setup(m => m.ForceRefreshMonitorsAsync(It.IsAny<CancellationToken>()))
+                .Returns(() => Interlocked.Increment(ref refreshCalls) == 1 ? firstRefresh.Task : secondRefresh.Task);
+            _mediator
+                .Setup(m => m.SendAsync(It.IsAny<RestoreBrightnessOnAllMonitorsCommand>()))
+                .Returns(Task.CompletedTask);
+
+            var resyncTask = _sut.HandleResumeAsync();
+            await _sut.HandleResumeAsync();
+
+            Assert.Equal(1, refreshCalls);
+
+            firstRefresh.SetResult(new List<MonitorInfo>());
+            await WaitUntilAsync(() => Volatile.Read(ref refreshCalls) == 2);
+            secondRefresh.SetResult(new List<MonitorInfo>());
+            await resyncTask;
+
+            _monitorInfoManager.Verify(m => m.ForceRefreshMonitorsAsync(It.IsAny<CancellationToken>()), Times.Exactly(2));
+            _idleDetection.Verify(i => i.UpdateSettings(persisted), Times.Exactly(2));
+            _mediator.Verify(m => m.SendAsync(It.IsAny<RestoreBrightnessOnAllMonitorsCommand>()), Times.Exactly(2));
         }
 
         [Fact]
@@ -70,6 +109,19 @@ namespace OLED_Sleeper.Tests.Features.MonitorState
             }
 
             Assert.Equal(1, invoked);
+        }
+
+        private static async Task WaitUntilAsync(Func<bool> condition)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            while (!condition())
+            {
+                if (timeout.IsCancellationRequested)
+                {
+                    throw new TimeoutException("Condition was not reached before timeout.");
+                }
+                await Task.Delay(10);
+            }
         }
     }
 }
