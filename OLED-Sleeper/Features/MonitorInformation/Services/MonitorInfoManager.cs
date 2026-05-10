@@ -99,6 +99,12 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
         /// <inheritdoc />
         public async Task<IReadOnlyList<MonitorInfo>> ForceRefreshMonitorsAsync(CancellationToken cancellationToken = default)
         {
+            return await ForceRefreshMonitorsAsync(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <inheritdoc />
+        public async Task<IReadOnlyList<MonitorInfo>> ForceRefreshMonitorsAsync(TimeSpan phaseTimeout, CancellationToken cancellationToken = default)
+        {
             Task<List<MonitorInfo>>? inProgress;
             Task<List<MonitorInfo>> refreshTask;
             lock (_lock)
@@ -110,7 +116,7 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
             {
                 try
                 {
-                    await WaitForRefreshAsync(inProgress, cancellationToken).ConfigureAwait(false);
+                    await WaitForRefreshAsync(inProgress, phaseTimeout, cancellationToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -127,7 +133,7 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
                 refreshTask = _refreshTask ?? StartRefreshTaskLocked();
             }
 
-            return await WaitForRefreshAsync(refreshTask, cancellationToken).ConfigureAwait(false);
+            return await WaitForRefreshAsync(refreshTask, phaseTimeout, cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -212,6 +218,21 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
             }
 
             return await refreshTask.ConfigureAwait(false);
+        }
+
+        private static async Task<IReadOnlyList<MonitorInfo>> WaitForRefreshAsync(
+            Task<List<MonitorInfo>> refreshTask,
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
+        {
+            if (timeout == Timeout.InfiniteTimeSpan)
+            {
+                return await WaitForRefreshAsync(refreshTask, cancellationToken).ConfigureAwait(false);
+            }
+
+            using var timeoutSource = new CancellationTokenSource(timeout);
+            using var linkedSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
+            return await WaitForRefreshAsync(refreshTask, linkedSource.Token).ConfigureAwait(false);
         }
 
         private async Task<List<MonitorInfo>> RefreshMonitorsWorkerAsync()

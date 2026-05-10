@@ -160,14 +160,17 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             //    transition may be stale.
             try
             {
-                using var refreshTimeout = new CancellationTokenSource(MonitorRefreshTimeout);
-                var monitors = await _monitorInfoManager.ForceRefreshMonitorsAsync(refreshTimeout.Token);
+                var monitors = await _monitorInfoManager.ForceRefreshMonitorsAsync(MonitorRefreshTimeout);
                 Log.Information("Resume monitor refresh completed with {Count} monitors.", monitors.Count);
             }
             catch (OperationCanceledException)
             {
                 Log.Warning("Timed out waiting for resume monitor refresh after {TimeoutSeconds}s; using latest available monitor cache.",
                     MonitorRefreshTimeout.TotalSeconds);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to refresh monitors after resume; using latest available monitor cache.");
             }
 
             // 2. Re-apply idle detection settings so per-monitor state machines reset to Active.

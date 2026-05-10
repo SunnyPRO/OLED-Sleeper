@@ -37,6 +37,15 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services.Interfaces
         Task<IReadOnlyList<MonitorInfo>> ForceRefreshMonitorsAsync(CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Waits for any current refresh to finish, then performs or joins the next refresh that
+        /// starts after this request. Each wait phase gets its own timeout budget.
+        /// </summary>
+        /// <param name="phaseTimeout">Maximum wait time for the stale in-flight scan and again for the fresh scan.</param>
+        /// <param name="cancellationToken">Cancels waiting for the refresh result; the native refresh may continue in the background.</param>
+        /// <returns>The freshly enumerated and enriched monitor list.</returns>
+        Task<IReadOnlyList<MonitorInfo>> ForceRefreshMonitorsAsync(TimeSpan phaseTimeout, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Gets the latest, up-to-date list of monitors from the system (basic info only, no enrichment).
         /// </summary>
         /// <returns>A list of <see cref="MonitorInfo"/> objects representing the latest monitors.</returns>

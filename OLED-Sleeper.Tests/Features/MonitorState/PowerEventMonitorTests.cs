@@ -38,7 +38,7 @@ namespace OLED_Sleeper.Tests.Features.MonitorState
             _settingsFile.Setup(s => s.LoadSettings()).Returns(persisted);
             var refreshRequested = false;
             _monitorInfoManager
-                .Setup(m => m.ForceRefreshMonitorsAsync(It.IsAny<CancellationToken>()))
+                .Setup(m => m.ForceRefreshMonitorsAsync(TimeSpan.FromSeconds(12), It.IsAny<CancellationToken>()))
                 .Callback(() => refreshRequested = true)
                 .Returns(refreshCompletion.Task);
             _mediator
@@ -54,7 +54,7 @@ namespace OLED_Sleeper.Tests.Features.MonitorState
             refreshCompletion.SetResult(new List<MonitorInfo>());
             await resyncTask;
 
-            _monitorInfoManager.Verify(m => m.ForceRefreshMonitorsAsync(It.IsAny<CancellationToken>()), Times.Once);
+            _monitorInfoManager.Verify(m => m.ForceRefreshMonitorsAsync(TimeSpan.FromSeconds(12), It.IsAny<CancellationToken>()), Times.Once);
             _idleDetection.Verify(i => i.UpdateSettings(persisted), Times.Once);
             _mediator.Verify(m => m.SendAsync(It.IsAny<RestoreBrightnessOnAllMonitorsCommand>()), Times.Once);
         }
@@ -72,7 +72,7 @@ namespace OLED_Sleeper.Tests.Features.MonitorState
 
             _settingsFile.Setup(s => s.LoadSettings()).Returns(persisted);
             _monitorInfoManager
-                .Setup(m => m.ForceRefreshMonitorsAsync(It.IsAny<CancellationToken>()))
+                .Setup(m => m.ForceRefreshMonitorsAsync(TimeSpan.FromSeconds(12), It.IsAny<CancellationToken>()))
                 .Returns(() => Interlocked.Increment(ref refreshCalls) == 1 ? firstRefresh.Task : secondRefresh.Task);
             _mediator
                 .Setup(m => m.SendAsync(It.IsAny<RestoreBrightnessOnAllMonitorsCommand>()))
@@ -88,9 +88,30 @@ namespace OLED_Sleeper.Tests.Features.MonitorState
             secondRefresh.SetResult(new List<MonitorInfo>());
             await resyncTask;
 
-            _monitorInfoManager.Verify(m => m.ForceRefreshMonitorsAsync(It.IsAny<CancellationToken>()), Times.Exactly(2));
+            _monitorInfoManager.Verify(m => m.ForceRefreshMonitorsAsync(TimeSpan.FromSeconds(12), It.IsAny<CancellationToken>()), Times.Exactly(2));
             _idleDetection.Verify(i => i.UpdateSettings(persisted), Times.Exactly(2));
             _mediator.Verify(m => m.SendAsync(It.IsAny<RestoreBrightnessOnAllMonitorsCommand>()), Times.Exactly(2));
+        }
+
+        [Fact]
+        public async Task HandleResume_WhenMonitorRefreshFails_StillReappliesSettingsAndRestoresBrightness()
+        {
+            var persisted = new List<MonitorSettings>
+            {
+                new() { HardwareId = "MON-1", IsManaged = true }
+            };
+            _settingsFile.Setup(s => s.LoadSettings()).Returns(persisted);
+            _monitorInfoManager
+                .Setup(m => m.ForceRefreshMonitorsAsync(TimeSpan.FromSeconds(12), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new InvalidOperationException("Driver not ready"));
+            _mediator
+                .Setup(m => m.SendAsync(It.IsAny<RestoreBrightnessOnAllMonitorsCommand>()))
+                .Returns(Task.CompletedTask);
+
+            await _sut.HandleResumeAsync();
+
+            _idleDetection.Verify(i => i.UpdateSettings(persisted), Times.Once);
+            _mediator.Verify(m => m.SendAsync(It.IsAny<RestoreBrightnessOnAllMonitorsCommand>()), Times.Once);
         }
 
         [Fact]

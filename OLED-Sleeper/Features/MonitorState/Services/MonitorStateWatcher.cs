@@ -49,6 +49,7 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         private HashSet<string> _knownPhantomDeviceNames = new();
         private int _isPollRunning;
         private int _isDeepRevalidateRunning;
+        private int _deepRevalidateAgainRequested;
         private int _isDisplayChangeRevalidateScheduled;
         private bool _isDisplaySettingsSubscribed;
         private bool _isStopped;
@@ -211,58 +212,37 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             Log.Information("Display settings changed - scheduling monitor deep re-validate.");
             if (Interlocked.Exchange(ref _isDisplayChangeRevalidateScheduled, 1) == 1)
             {
+                if (Volatile.Read(ref _isDeepRevalidateRunning) == 1)
+                {
+                    Interlocked.Exchange(ref _deepRevalidateAgainRequested, 1);
+                }
                 return;
             }
 
             _ = Task.Run(async () =>
             {
-                try
-                {
-                    await Task.Delay(DisplayChangeRevalidateDelayMs);
-                    RunDeepRevalidate("display settings change found DDC/CI, HardwareId, or layout change");
-                }
-                finally
-                {
-                    Interlocked.Exchange(ref _isDisplayChangeRevalidateScheduled, 0);
-                }
+                await Task.Delay(DisplayChangeRevalidateDelayMs);
+                Interlocked.Exchange(ref _isDisplayChangeRevalidateScheduled, 0);
+                RunDeepRevalidate("display settings change found DDC/CI, HardwareId, or layout change");
             });
         }
 
         private void RunDeepRevalidate(string reason)
         {
-            if (Interlocked.Exchange(ref _isDeepRevalidateRunning, 1) == 1)
+            if (Interlocked.CompareExchange(ref _isDeepRevalidateRunning, 1, 0) != 0)
             {
-                Log.Debug("MonitorStateWatcher deep revalidate already running; skipping duplicate request.");
+                Interlocked.Exchange(ref _deepRevalidateAgainRequested, 1);
+                Log.Debug("MonitorStateWatcher deep revalidate already running; queued one follow-up pass.");
                 return;
             }
 
             try
             {
-                IReadOnlyList<MonitorInfo> lastKnownSnapshot;
-                lock (_lock)
+                do
                 {
-                    if (_isStopped) return;
-                    lastKnownSnapshot = _lastKnownMonitors;
-                }
-
-                var current = _monitorInfoManager.GetLatestMonitorsBasicInfo();
-                EnrichMonitorInfoList(current);
-                var manageable = FilterManageableMonitors(current);
-                PreserveKnownDdcSupport(lastKnownSnapshot, manageable);
-
-                lock (_lock)
-                {
-                    if (_isStopped) return;
-                    UpdatePhantomCache(current, manageable);
-                }
-
-                if (AreEnrichedMonitorListsEqual(lastKnownSnapshot, manageable))
-                {
-                    Log.Debug("Monitor deep re-validate: no capability changes.");
-                    return;
-                }
-
-                CommitResync(manageable, lastKnownSnapshot, reason);
+                    Interlocked.Exchange(ref _deepRevalidateAgainRequested, 0);
+                    RunDeepRevalidatePass(reason);
+                } while (Volatile.Read(ref _deepRevalidateAgainRequested) == 1);
             }
             catch (Exception ex)
             {
@@ -271,7 +251,40 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             finally
             {
                 Interlocked.Exchange(ref _isDeepRevalidateRunning, 0);
+                if (Interlocked.Exchange(ref _deepRevalidateAgainRequested, 0) == 1)
+                {
+                    _ = Task.Run(() => RunDeepRevalidate("queued monitor deep re-validate follow-up"));
+                }
             }
+        }
+
+        private void RunDeepRevalidatePass(string reason)
+        {
+            IReadOnlyList<MonitorInfo> lastKnownSnapshot;
+            lock (_lock)
+            {
+                if (_isStopped) return;
+                lastKnownSnapshot = _lastKnownMonitors;
+            }
+
+            var current = _monitorInfoManager.GetLatestMonitorsBasicInfo();
+            EnrichMonitorInfoList(current);
+            var manageable = FilterManageableMonitors(current);
+            PreserveKnownDdcSupport(lastKnownSnapshot, manageable);
+
+            lock (_lock)
+            {
+                if (_isStopped) return;
+                UpdatePhantomCache(current, manageable);
+            }
+
+            if (AreEnrichedMonitorListsEqual(lastKnownSnapshot, manageable))
+            {
+                Log.Debug("Monitor deep re-validate: no capability changes.");
+                return;
+            }
+
+            CommitResync(manageable, lastKnownSnapshot, reason);
         }
 
         private void CommitResync(List<MonitorInfo> manageable, IReadOnlyList<MonitorInfo> oldSnapshot, string reason)
@@ -386,7 +399,7 @@ namespace OLED_Sleeper.Features.MonitorState.Services
         }
 
         /// <summary>
-        /// Full comparison including HardwareId and DDC/CI support.
+        /// Full comparison including HardwareId, DDC/CI support, and layout.
         /// </summary>
         internal static bool AreEnrichedMonitorListsEqual(IReadOnlyList<MonitorInfo>? a, IReadOnlyList<MonitorInfo>? b)
         {
@@ -394,7 +407,7 @@ namespace OLED_Sleeper.Features.MonitorState.Services
             if (a.Count != b.Count) return false;
 
             string Key(MonitorInfo m) =>
-                $"{m.DeviceName ?? string.Empty}|{m.HardwareId ?? string.Empty}|{(m.IsDdcCiSupported ? 1 : 0)}";
+                $"{m.DeviceName ?? string.Empty}|{m.HardwareId ?? string.Empty}|{(m.IsDdcCiSupported ? 1 : 0)}|{m.Bounds.Left:0.###},{m.Bounds.Top:0.###},{m.Bounds.Width:0.###},{m.Bounds.Height:0.###}|{m.DisplayNumber}";
 
             var aKeys = new HashSet<string>(a.Select(Key));
             var bKeys = new HashSet<string>(b.Select(Key));

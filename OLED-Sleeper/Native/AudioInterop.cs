@@ -28,10 +28,23 @@ namespace OLED_Sleeper.Native
         [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         public interface IMMDeviceEnumerator
         {
-            int EnumAudioEndpoints(EDataFlow dataFlow, uint dwStateMask, out IntPtr ppDevices);
+            [PreserveSig]
+            int EnumAudioEndpoints(EDataFlow dataFlow, uint dwStateMask, out IMMDeviceCollection ppDevices);
 
             [PreserveSig]
             int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice ppEndpoint);
+        }
+
+        [ComImport]
+        [Guid("0BD7A1BE-7A1A-44DB-8397-C0A1B4BF3AE3")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        public interface IMMDeviceCollection
+        {
+            [PreserveSig]
+            int GetCount(out uint pcDevices);
+
+            [PreserveSig]
+            int Item(uint nDevice, out IMMDevice ppDevice);
         }
 
         [ComImport]
@@ -107,5 +120,6 @@ namespace OLED_Sleeper.Native
 
         public static readonly Guid IID_IAudioSessionManager2 = new("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
         public const uint CLSCTX_ALL = 23;
+        public const uint DEVICE_STATE_ACTIVE = 0x00000001;
     }
 }

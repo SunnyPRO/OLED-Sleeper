@@ -56,32 +56,71 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
         {
             var pids = new HashSet<uint>();
             AudioInterop.IMMDeviceEnumerator? enumerator = null;
-            AudioInterop.IMMDevice? device = null;
-            AudioInterop.IAudioSessionManager2? sessionManager = null;
+            AudioInterop.IMMDeviceCollection? devices = null;
+
+            try
+            {
+                enumerator = (AudioInterop.IMMDeviceEnumerator)new AudioInterop.MMDeviceEnumeratorComObject();
+                if (enumerator.EnumAudioEndpoints(AudioInterop.EDataFlow.eRender, AudioInterop.DEVICE_STATE_ACTIVE, out devices) != 0 || devices == null)
+                {
+                    return pids;
+                }
+
+                if (devices.GetCount(out var count) != 0)
+                {
+                    return pids;
+                }
+
+                for (uint i = 0; i < count; i++)
+                {
+                    AudioInterop.IMMDevice? device = null;
+                    try
+                    {
+                        if (devices.Item(i, out device) != 0 || device == null) continue;
+                        AddActiveAudioSessionProcessIds(device, pids);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Debug(ex, "MediaPlaybackDetector: failed to enumerate audio endpoint {EndpointIndex}.", i);
+                    }
+                    finally
+                    {
+                        if (device != null) Marshal.ReleaseComObject(device);
+                    }
+                }
+            }
+            finally
+            {
+                if (devices != null) Marshal.ReleaseComObject(devices);
+                if (enumerator != null) Marshal.ReleaseComObject(enumerator);
+            }
+            return pids;
+        }
+
+        private static void AddActiveAudioSessionProcessIds(AudioInterop.IMMDevice device, HashSet<uint> pids)
+        {
             AudioInterop.IAudioSessionEnumerator? sessionEnum = null;
             object? sessionManagerObj = null;
 
             try
             {
-                enumerator = (AudioInterop.IMMDeviceEnumerator)new AudioInterop.MMDeviceEnumeratorComObject();
-                if (enumerator.GetDefaultAudioEndpoint(AudioInterop.EDataFlow.eRender, AudioInterop.ERole.eMultimedia, out device) != 0 || device == null)
-                {
-                    return pids;
-                }
-
                 var iid = AudioInterop.IID_IAudioSessionManager2;
                 if (device.Activate(ref iid, AudioInterop.CLSCTX_ALL, IntPtr.Zero, out sessionManagerObj) != 0 || sessionManagerObj == null)
                 {
-                    return pids;
+                    return;
                 }
 
-                sessionManager = (AudioInterop.IAudioSessionManager2)sessionManagerObj;
+                var sessionManager = (AudioInterop.IAudioSessionManager2)sessionManagerObj;
                 if (sessionManager.GetSessionEnumerator(out sessionEnum) != 0 || sessionEnum == null)
                 {
-                    return pids;
+                    return;
                 }
 
-                sessionEnum.GetCount(out var count);
+                if (sessionEnum.GetCount(out var count) != 0)
+                {
+                    return;
+                }
+
                 for (var i = 0; i < count; i++)
                 {
                     AudioInterop.IAudioSessionControl? control = null;
@@ -91,12 +130,13 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
 
                         if (control is not AudioInterop.IAudioSessionControl2 control2) continue;
 
-                        control2.GetState(out var state);
+                        if (control2.GetState(out var state) != 0) continue;
                         if (state != AudioInterop.AudioSessionState.AudioSessionStateActive) continue;
 
                         // IsSystemSoundsSession returns S_OK (0) if the session IS system sounds,
                         // S_FALSE (1) otherwise. Skip system sounds — no real owning process.
-                        if (control2.IsSystemSoundsSession() == 0) continue;
+                        var systemSoundsResult = control2.IsSystemSoundsSession();
+                        if (systemSoundsResult <= 0) continue;
 
                         if (control2.GetProcessId(out var pid) == 0 && pid != 0)
                         {
@@ -115,10 +155,7 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
                 // sessionManager and sessionManagerObj are the same RCW (a managed cast does QI
                 // but returns the same underlying wrapper). Release once.
                 if (sessionManagerObj != null) Marshal.ReleaseComObject(sessionManagerObj);
-                if (device != null) Marshal.ReleaseComObject(device);
-                if (enumerator != null) Marshal.ReleaseComObject(enumerator);
             }
-            return pids;
         }
 
         private IReadOnlyList<IntPtr> GetTopLevelVisibleWindows()

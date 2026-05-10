@@ -27,6 +27,50 @@ namespace OLED_Sleeper.Tests.Features.MonitorInformation
             Assert.Equal("MON-2", monitors.Single().HardwareId);
         }
 
+        [Fact]
+        public async Task ForceRefreshMonitorsAsync_WithPhaseTimeout_GivesEachScanItsOwnBudget()
+        {
+            var provider = new BlockingTwoScanProvider();
+            var manager = new MonitorInfoManager(provider);
+
+            manager.GetCurrentMonitorsAsync();
+            await provider.FirstScanStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+            var forceRefresh = manager.ForceRefreshMonitorsAsync(TimeSpan.FromMilliseconds(500));
+
+            await Task.Delay(300);
+            provider.AllowFirstScan.SetResult();
+            await provider.SecondScanStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+            await Task.Delay(300);
+            provider.AllowSecondScan.SetResult();
+
+            var monitors = await forceRefresh;
+
+            Assert.Equal(2, provider.BasicScanCount);
+            Assert.Equal("MON-2", monitors.Single().HardwareId);
+        }
+
+        [Fact]
+        public async Task ForceRefreshMonitorsAsync_WithPhaseTimeout_TimesOutWaitingForInProgressRefresh()
+        {
+            var provider = new BlockingFirstScanProvider();
+            var manager = new MonitorInfoManager(provider);
+
+            manager.GetCurrentMonitorsAsync();
+            await provider.FirstScanStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+            try
+            {
+                await Assert.ThrowsAsync<OperationCanceledException>(
+                    () => manager.ForceRefreshMonitorsAsync(TimeSpan.FromMilliseconds(25)));
+            }
+            finally
+            {
+                provider.AllowFirstScan.SetResult();
+            }
+        }
+
         private sealed class BlockingFirstScanProvider : IMonitorInfoProvider
         {
             public readonly TaskCompletionSource FirstScanStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -40,6 +84,44 @@ namespace OLED_Sleeper.Tests.Features.MonitorInformation
                 {
                     FirstScanStarted.SetResult();
                     AllowFirstScan.Task.GetAwaiter().GetResult();
+                }
+
+                return new List<MonitorInfo>
+                {
+                    new()
+                    {
+                        DeviceName = @"\\.\DISPLAY1",
+                        DisplayNumber = scanNumber,
+                        Bounds = new Rect(0, 0, 100, 100)
+                    }
+                };
+            }
+
+            public bool GetDdcCiSupport(MonitorInfo monitor) => true;
+
+            public string GetHardwareId(MonitorInfo monitor) => $"MON-{monitor.DisplayNumber}";
+        }
+
+        private sealed class BlockingTwoScanProvider : IMonitorInfoProvider
+        {
+            public readonly TaskCompletionSource FirstScanStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public readonly TaskCompletionSource SecondScanStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public readonly TaskCompletionSource AllowFirstScan = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public readonly TaskCompletionSource AllowSecondScan = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public int BasicScanCount;
+
+            public List<MonitorInfo> GetAllMonitorsBasicInfo()
+            {
+                var scanNumber = Interlocked.Increment(ref BasicScanCount);
+                if (scanNumber == 1)
+                {
+                    FirstScanStarted.SetResult();
+                    AllowFirstScan.Task.GetAwaiter().GetResult();
+                }
+                else if (scanNumber == 2)
+                {
+                    SecondScanStarted.SetResult();
+                    AllowSecondScan.Task.GetAwaiter().GetResult();
                 }
 
                 return new List<MonitorInfo>
