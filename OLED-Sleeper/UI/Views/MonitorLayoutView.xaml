@@ -47,13 +47,11 @@
         </Style>
 
         <Style x:Key="MonitorBorderStyle" TargetType="Border">
-            <Setter Property="Effect">
-                <Setter.Value>
-                    <DropShadowEffect ShadowDepth="2" BlurRadius="10" Color="#000000" Opacity="0.4" />
-                </Setter.Value>
-            </Setter>
+            <!-- Uses a static BorderBrush edge instead of a DropShadowEffect. The pixel-shader
+                 shadow was re-rendered every composition tick (visible as continuous GPU use
+                 on the 3D engine even while the window was hidden to tray). -->
             <Setter Property="BorderThickness" Value="2" />
-            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="{StaticResource SeparatorColorBrush}" />
             <Setter Property="RenderOptions.BitmapScalingMode" Value="HighQuality" />
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">

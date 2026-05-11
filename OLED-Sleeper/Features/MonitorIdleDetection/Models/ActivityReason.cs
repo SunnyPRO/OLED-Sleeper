@@ -24,6 +24,11 @@
         /// <summary>
         /// System input (keyboard or mouse activity) was detected.
         /// </summary>
-        SystemInput
+        SystemInput,
+
+        /// <summary>
+        /// A process is actively rendering audio and its window is visible on this monitor.
+        /// </summary>
+        MediaPlaying
     }
 }

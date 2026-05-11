@@ -31,6 +31,7 @@ namespace OLED_Sleeper.Core
         private readonly IMonitorIdleDetectionService _monitorIdleDetectionService;
         private readonly IMonitorSettingsFileService _monitorSettingsFileService;
         private readonly IMonitorStateWatcher _monitorStateWatcher;
+        private readonly IPowerEventMonitor _powerEventMonitor;
 
         #region Constructor
 
@@ -41,16 +42,19 @@ namespace OLED_Sleeper.Core
         /// <param name="monitorIdleDetectionService">Service for detecting monitor idle state and applying idle/active behaviors.</param>
         /// <param name="monitorSettingsFileService">Service for loading and saving monitor settings.</param>
         /// <param name="monitorStateWatcher">Service for monitoring system monitor connection/disconnection.</param>
+        /// <param name="powerEventMonitor">Service for reacting to OS suspend/resume notifications.</param>
         public ApplicationOrchestrator(
             IMediator mediator,
             IMonitorIdleDetectionService monitorIdleDetectionService,
             IMonitorSettingsFileService monitorSettingsFileService,
-            IMonitorStateWatcher monitorStateWatcher)
+            IMonitorStateWatcher monitorStateWatcher,
+            IPowerEventMonitor powerEventMonitor)
         {
             _mediator = mediator;
             _monitorIdleDetectionService = monitorIdleDetectionService;
             _monitorSettingsFileService = monitorSettingsFileService;
             _monitorStateWatcher = monitorStateWatcher;
+            _powerEventMonitor = powerEventMonitor;
         }
 
         #endregion Constructor
@@ -65,6 +69,7 @@ namespace OLED_Sleeper.Core
             SendRestoreBrightnessOnAllMonitorsCommand();
             SubscribeToEvents();
             InitializeStateWatcher();
+            _powerEventMonitor.Start();
         }
 
         /// <summary>
@@ -73,6 +78,7 @@ namespace OLED_Sleeper.Core
         public void Stop()
         {
             Log.Information("ApplicationOrchestrator is stopping.");
+            _powerEventMonitor.Stop();
             RestoreAllMonitors();
             UnsubscribeFromEvents();
             _monitorIdleDetectionService.Stop();

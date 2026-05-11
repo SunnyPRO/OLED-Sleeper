@@ -20,11 +20,18 @@ namespace OLED_Sleeper.Features.MonitorDimming.Handlers
             if (state.Any())
             {
                 Log.Warning("Found {Count} monitors that were left dimmed from a previous session. Attempting to restore.", state.Count);
+                var remaining = new Dictionary<string, uint>();
                 foreach (var entry in state)
                 {
-                    await monitorDimmingService.RestoreBrightnessAsync(entry.Key, entry.Value);
+                    if (!await monitorDimmingService.RestoreBrightnessAsync(entry.Key, entry.Value))
+                    {
+                        remaining[entry.Key] = entry.Value;
+                    }
                 }
-                monitorBrightnessStateService.SaveState(new Dictionary<string, uint>());
+                // Persist the authoritative result from this pass. The concrete dimming service
+                // may also clear its in-memory state on success, but this keeps file state correct
+                // even if it restored entries loaded by this handler after service construction.
+                monitorBrightnessStateService.SaveState(remaining);
             }
         }
     }

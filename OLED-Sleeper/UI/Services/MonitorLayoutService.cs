@@ -31,14 +31,20 @@ namespace OLED_Sleeper.UI.Services
                 return monitorLayoutViewModels;
             }
 
-            LogMonitorInfos(monitorInfos);
+            var orderedMonitorInfos = monitorInfos
+                .OrderBy(m => m.DisplayNumber < 0 ? int.MaxValue : m.DisplayNumber)
+                .ThenBy(m => m.Bounds.Left)
+                .ThenBy(m => m.Bounds.Top)
+                .ToList();
 
-            var totalBounds = CalculateTotalBounds(monitorInfos);
+            LogMonitorInfos(orderedMonitorInfos);
+
+            var totalBounds = CalculateTotalBounds(orderedMonitorInfos);
             Log.Debug("Calculated TotalBounds: {Bounds}", totalBounds);
 
             var (scale, offsetX, offsetY) = CalculateLayoutParameters(containerWidth, containerHeight, totalBounds);
 
-            monitorLayoutViewModels = CreateMonitorViewModels(monitorInfos, scale, totalBounds, offsetX, offsetY);
+            monitorLayoutViewModels = CreateMonitorViewModels(orderedMonitorInfos, scale, totalBounds, offsetX, offsetY);
 
             Log.Debug("--- Finished Layout Calculation ---");
             return monitorLayoutViewModels;

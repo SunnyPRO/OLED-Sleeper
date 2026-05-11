@@ -211,7 +211,11 @@ namespace OLED_Sleeper.UI.ViewModels
         }
 
         /// <summary>
-        /// Handles logic for when the main window is closing. Returns true if the window should close, false to cancel.
+        /// Handles logic for when the main window is closing. Returns true if the window should
+        /// close, false to cancel. Closing sends the app to the tray — a fresh window is
+        /// created by <c>MainWindowService</c> the next time the tray icon is activated.
+        /// The application itself keeps running because <c>App.xaml</c> declares
+        /// <c>ShutdownMode="OnExplicitShutdown"</c>; only the tray "Exit" action shuts the app down.
         /// </summary>
         /// <returns>True to allow closing, false to cancel.</returns>
         public bool OnWindowClosing()
@@ -219,14 +223,14 @@ namespace OLED_Sleeper.UI.ViewModels
             if (IsDirty)
             {
                 var result = MessageBox.Show(
-                    "You have unsaved changes. Would you like to save them before hiding the window?",
+                    "You have unsaved changes. Would you like to save them before closing?",
                     "Unsaved Changes",
                     MessageBoxButton.YesNoCancel,
                     MessageBoxImage.Warning);
 
                 if (result == MessageBoxResult.Cancel)
                 {
-                    return false; // Cancel closing
+                    return false;
                 }
 
                 if (result == MessageBoxResult.Yes)
@@ -234,10 +238,8 @@ namespace OLED_Sleeper.UI.ViewModels
                     SaveSettingsCommand.Execute(null);
                 }
             }
-            // Hide the window instead of closing
-            Application.Current.MainWindow?.Hide();
 
-            return false;
+            return true;
         }
 
         #endregion Public Methods (for View Interaction)
@@ -338,6 +340,12 @@ namespace OLED_Sleeper.UI.ViewModels
 
         private void OnWorkspaceReady(object? sender, ObservableCollection<MonitorLayoutViewModel> newMonitorLayoutViewModels)
         {
+            if (!Application.Current.Dispatcher.CheckAccess())
+            {
+                Application.Current.Dispatcher.Invoke(() => OnWorkspaceReady(sender, newMonitorLayoutViewModels));
+                return;
+            }
+
             PopulateMonitors(newMonitorLayoutViewModels);
             RestoreSelection();
             CheckDirtyState();
@@ -350,12 +358,6 @@ namespace OLED_Sleeper.UI.ViewModels
         /// <param name="newViewModels">The new monitor layout view models.</param>
         private void PopulateMonitors(ObservableCollection<MonitorLayoutViewModel> newViewModels)
         {
-            if (!Application.Current.Dispatcher.CheckAccess())
-            {
-                Application.Current.Dispatcher.Invoke(() => PopulateMonitors(newViewModels));
-                return;
-            }
-
             Monitors.Clear();
             foreach (var viewModel in newViewModels)
             {

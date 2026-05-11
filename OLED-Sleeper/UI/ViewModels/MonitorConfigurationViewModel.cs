@@ -223,6 +223,24 @@ namespace OLED_Sleeper.UI.ViewModels
             }
         }
 
+        private bool _isActiveOnMediaPlayback;
+        private bool _initialIsActiveOnMediaPlayback;
+
+        /// <summary>
+        /// Gets or sets whether an audio-rendering process visible on this monitor keeps it active.
+        /// </summary>
+        public bool IsActiveOnMediaPlayback
+        {
+            get => _isActiveOnMediaPlayback;
+            set
+            {
+                _isActiveOnMediaPlayback = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(ActiveConditionsError));
+                UpdateDirtyState();
+            }
+        }
+
         #endregion Properties
 
         /// <summary>
@@ -261,7 +279,8 @@ namespace OLED_Sleeper.UI.ViewModels
                        SelectedTimeUnit != _initialSelectedTimeUnit ||
                        IsActiveOnInput != _initialIsActiveOnInput ||
                        IsActiveOnMousePosition != _initialIsActiveOnMousePosition ||
-                       IsActiveOnActiveWindow != _initialIsActiveOnActiveWindow;
+                       IsActiveOnActiveWindow != _initialIsActiveOnActiveWindow ||
+                       IsActiveOnMediaPlayback != _initialIsActiveOnMediaPlayback;
 
             OnPropertyChanged(nameof(IsDirty));
             OnDirtyStateChanged?.Invoke();
@@ -280,6 +299,7 @@ namespace OLED_Sleeper.UI.ViewModels
             _initialIsActiveOnInput = IsActiveOnInput;
             _initialIsActiveOnMousePosition = IsActiveOnMousePosition;
             _initialIsActiveOnActiveWindow = IsActiveOnActiveWindow;
+            _initialIsActiveOnMediaPlayback = IsActiveOnMediaPlayback;
             UpdateDirtyState();
         }
 
@@ -297,6 +317,7 @@ namespace OLED_Sleeper.UI.ViewModels
             IsActiveOnInput = settings.IsActiveOnInput;
             IsActiveOnMousePosition = settings.IsActiveOnMousePosition;
             IsActiveOnActiveWindow = settings.IsActiveOnActiveWindow;
+            IsActiveOnMediaPlayback = settings.IsActiveOnMediaPlayback;
         }
 
         /// <summary>
@@ -315,7 +336,8 @@ namespace OLED_Sleeper.UI.ViewModels
                 IdleUnit = SelectedTimeUnit,
                 IsActiveOnInput = IsActiveOnInput,
                 IsActiveOnMousePosition = IsActiveOnMousePosition,
-                IsActiveOnActiveWindow = IsActiveOnActiveWindow
+                IsActiveOnActiveWindow = IsActiveOnActiveWindow,
+                IsActiveOnMediaPlayback = IsActiveOnMediaPlayback
             };
         }
 
@@ -391,7 +413,7 @@ namespace OLED_Sleeper.UI.ViewModels
         /// <returns>An error message if invalid, otherwise null.</returns>
         private string? ValidateActiveConditions()
         {
-            if (!IsActiveOnInput && !IsActiveOnMousePosition && !IsActiveOnActiveWindow)
+            if (!IsActiveOnInput && !IsActiveOnMousePosition && !IsActiveOnActiveWindow && !IsActiveOnMediaPlayback)
                 return "At least one 'Consider Active When' option must be selected.";
             return null;
         }

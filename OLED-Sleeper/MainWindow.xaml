@@ -121,7 +121,7 @@
                                 <Setter TargetName="IndeterminateRoot" Property="Visibility" Value="Visible" />
 
                                 <Trigger.EnterActions>
-                                    <BeginStoryboard>
+                                    <BeginStoryboard x:Name="IndeterminateStoryboard">
                                         <Storyboard RepeatBehavior="Forever">
                                             <DoubleAnimation
                                         Storyboard.TargetName="IndeterminateIndicator"
@@ -132,6 +132,13 @@
                                         </Storyboard>
                                     </BeginStoryboard>
                                 </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <!-- Stop the render-thread ticking when the loader is no longer
+                                         indeterminate (i.e. IsLoading flips to false). Without this
+                                         the storyboard clock keeps running even while the parent
+                                         overlay Grid is Collapsed, wasting ~0.1% GPU at idle. -->
+                                    <StopStoryboard BeginStoryboardName="IndeterminateStoryboard" />
+                                </Trigger.ExitActions>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -206,7 +213,7 @@
                   Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}">
                 <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
                     <ProgressBar Style="{StaticResource LoadingProgressBarStyle}"
-                                 IsIndeterminate="True"
+                                 IsIndeterminate="{Binding IsLoading}"
                                  Width="300" />
                     <TextBlock Text="Loading monitors..."
                                Foreground="White"

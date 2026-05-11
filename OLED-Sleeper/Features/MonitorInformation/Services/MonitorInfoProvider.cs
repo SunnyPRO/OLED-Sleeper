@@ -46,7 +46,11 @@ namespace OLED_Sleeper.Features.MonitorInformation.Services
             };
 
             NativeMethods.EnumDisplayMonitors(nint.Zero, nint.Zero, callback, nint.Zero);
-            return monitors;
+            return monitors
+                .OrderBy(m => m.DisplayNumber < 0 ? int.MaxValue : m.DisplayNumber)
+                .ThenBy(m => m.Bounds.Left)
+                .ThenBy(m => m.Bounds.Top)
+                .ToList();
         }
 
         /// <summary>
