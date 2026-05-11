@@ -17,7 +17,9 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
         private readonly object _cacheLock = new();
         private List<IntPtr> _windowsByProcessCache = new();
         private DateTime _windowCacheTimestamp = DateTime.MinValue;
+        private DateTime _lastAudioEnumerationFailureLogUtc = DateTime.MinValue;
         private static readonly TimeSpan WindowCacheTtl = TimeSpan.FromMilliseconds(500);
+        private static readonly TimeSpan AudioEnumerationFailureLogInterval = TimeSpan.FromMinutes(1);
 
         public IReadOnlyList<Rect> GetPlaybackWindowRects()
         {
@@ -28,7 +30,7 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
             }
             catch (Exception ex)
             {
-                Log.Debug(ex, "MediaPlaybackDetector: failed to enumerate audio sessions.");
+                LogAudioEnumerationFailure(ex);
                 return Array.Empty<Rect>();
             }
 
@@ -79,9 +81,9 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
                         if (devices.Item(i, out device) != 0 || device == null) continue;
                         AddActiveAudioSessionProcessIds(device, pids);
                     }
-                    catch (Exception ex)
+                    catch
                     {
-                        Log.Debug(ex, "MediaPlaybackDetector: failed to enumerate audio endpoint {EndpointIndex}.", i);
+                        // One broken endpoint should not disable media detection for the others.
                     }
                     finally
                     {
@@ -95,6 +97,21 @@ namespace OLED_Sleeper.Features.MonitorIdleDetection.Services
                 if (enumerator != null) Marshal.ReleaseComObject(enumerator);
             }
             return pids;
+        }
+
+        private void LogAudioEnumerationFailure(Exception ex)
+        {
+            lock (_cacheLock)
+            {
+                var now = DateTime.UtcNow;
+                if (now - _lastAudioEnumerationFailureLogUtc < AudioEnumerationFailureLogInterval)
+                {
+                    return;
+                }
+                _lastAudioEnumerationFailureLogUtc = now;
+            }
+
+            Log.Debug(ex, "MediaPlaybackDetector: failed to enumerate audio sessions.");
         }
 
         private static void AddActiveAudioSessionProcessIds(AudioInterop.IMMDevice device, HashSet<uint> pids)
